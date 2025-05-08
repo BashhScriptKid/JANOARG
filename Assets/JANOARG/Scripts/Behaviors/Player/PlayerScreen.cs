@@ -6,6 +6,7 @@ using UnityEngine.UI;
 using UnityEngine.EventSystems;
 using System.IO;
 using System;
+using Random = UnityEngine.Random;
 
 public class PlayerScreen : MonoBehaviour
 {
@@ -90,6 +91,10 @@ public class PlayerScreen : MonoBehaviour
     public List<HitObjectHistoryItem> HitObjectHistory;
     [Space]
     public int HitsRemaining = 0;
+
+    [Space] 
+    public bool ShowALLLanes = false;
+    public bool ShowHitboxes = false;
     
     [HideInInspector]
     public List<LaneStyleManager> LaneStyles = new ();
@@ -145,6 +150,30 @@ public class PlayerScreen : MonoBehaviour
         CurrentChart = TargetChart.Data.DeepClone();
         HitObjectHistory = new();
 
+        if (ShowALLLanes)
+        {
+            foreach (Lane lane in CurrentChart.Lanes) // Apply to all lanes in list
+            {
+                if (lane.StyleIndex == -1)
+                {
+                    // For invisible lanes, create a new temporary style
+                    LaneStyle style = new LaneStyle();
+                    lane.StyleIndex = CurrentChart.Palette.LaneStyles.Count; // Set to new index
+                    CurrentChart.Palette.LaneStyles.Add(style);
+                }
+        
+                // Now we can safely access the style
+                LaneStyle laneStyle = CurrentChart.Palette.LaneStyles[lane.StyleIndex];
+                laneStyle.LaneColor = new Color(
+                    Random.value, 
+                    Random.value, 
+                    Random.value, 
+                    0.8f);
+            }
+        }
+        
+        
+        
         if (HasPlayedBefore) 
         {
             TotalExScore = CurrentExScore = 0;
