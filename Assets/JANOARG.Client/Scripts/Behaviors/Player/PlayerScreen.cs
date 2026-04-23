@@ -149,6 +149,10 @@ namespace JANOARG.Client.Behaviors.Player
         [Space]
         public List<HitObjectHistoryItem> HitObjectHistory;
 
+        // Median of non-zero, non-infinity Timing offsets — attach to result screen in scene.
+        // Updated after every qualifying hit so it's always current.
+        public double MedianTimingOffset;
+
         [Space]
         public int HitsRemaining = 0;
 
@@ -287,6 +291,8 @@ namespace JANOARG.Client.Behaviors.Player
                                 MaxCombo =
                                     TotalCombo =
                                         HitsRemaining = 0;
+
+                MedianTimingOffset = 0;
 
                 ScoreCounter.SetNumber(0);
                 SongProgress.value = 0;
@@ -788,6 +794,7 @@ namespace JANOARG.Client.Behaviors.Player
             // Remaining total hitobject AND Current input's hold -> Remaining lane count -> End of song
             if (((HitsRemaining <= 0 && PlayerInputManager.sInstance.HoldQueue.Count == 0) || Lanes.Count == 0 || (float)CurrentTime / Music.clip.length >= 1) && !ResultExec)
             {
+                ComputeAndSaveMedianOffset();
                 PlayerScreenResult.sMain.StartEndingAnim();
                 ResultExec = true;
             }
@@ -917,6 +924,26 @@ namespace JANOARG.Client.Behaviors.Player
                 CurrentTime = (double)Music.timeSamples / Music.clip.frequency;
         }
 
+        // Call on pause or result entry — deferred so per-hit cost is just a list append.
+        public void ComputeAndSaveMedianOffset()
+        {
+            var samples = HitObjectHistory
+                .Where(h => h.Type == HitObjectHistoryType.Timing
+                            && !double.IsInfinity(h.Offset))
+                .Select(h => h.Offset)
+                .OrderBy(x => x)
+                .ToList();
+
+            if (samples.Count == 0) return;
+
+            int mid = samples.Count / 2;
+            MedianTimingOffset = samples.Count % 2 == 0
+                ? (samples[mid - 1] + samples[mid]) / 2.0
+                : samples[mid];
+
+            CommonSys.sMain.Preferences.Set("PLYR:GameplayMedianOffset", (float)(MedianTimingOffset * 1000));
+        }
+
         // Tracks whether we auto-paused due to focus loss, so we don't stomp a manual pause
         private bool _PausedByFocusLoss;
 
@@ -936,6 +963,7 @@ namespace JANOARG.Client.Behaviors.Player
                     IsPlaying = false;
                     Music.Pause();
                     _LastDSPTime = AudioSettings.dspTime;
+                    ComputeAndSaveMedianOffset();
                     PlayerScreenPause.sMain.Show();
                 }
             }
@@ -964,6 +992,7 @@ namespace JANOARG.Client.Behaviors.Player
                     IsPlaying = false;
                     Music.Pause();
                     _LastDSPTime = AudioSettings.dspTime;
+                    ComputeAndSaveMedianOffset();
                     PlayerScreenPause.sMain.Show();
                 }
             }
