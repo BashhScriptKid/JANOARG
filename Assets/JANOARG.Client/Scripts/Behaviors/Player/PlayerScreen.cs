@@ -168,9 +168,7 @@ namespace JANOARG.Client.Behaviors.Player
         private double _MusicStartDSP;  // DSP time at which Music.PlayScheduled was called
         private const double SpikeThreshold = 0.1; // 100ms — above this, treat as a spike
 
-        // Frame skipping: skip visual update when logic ran less than this ago
-        private const float FrameSkipThreshold = 1f / 15f; // skip visual if >15 fps worth of logic work done
-        private float _LastVisualTime = float.NegativeInfinity;
+        private double _LastVisualDSPTime = double.NegativeInfinity; // reserved for future use
 
         // Visual lerp: smooth camera/lane group positions across frames
         private Vector3    _LerpedCameraPos;
@@ -786,87 +784,6 @@ namespace JANOARG.Client.Behaviors.Player
                         lane.UpdateHoldMesh(hit);
             PlayerInputManager.sInstance.UpdateInput();
 
-            // Update song progress slider (always, even on skipped frames)
-            SongProgress.value = (float)(CurrentTime / Music.clip.length);
-
-            // Your code break things, great job :thumbs_up:
-
-            float visualTime = (float)CurrentTime + Settings.VisualOffset;
-            float visualBeat = sTargetSong.Timing.ToBeat(visualTime);
-
-            // Frame skipping: if visualTime hasn't advanced enough to justify a full render pass,
-            // skip the heavy storyboard/lane work. Input and scoring above are unaffected.
-            bool skipVisual = _LastVisualTime > float.NegativeInfinity
-                              && (visualTime - _LastVisualTime) < FrameSkipThreshold;
-
-            if (!skipVisual)
-            {
-                _LastVisualTime = visualTime;
-
-                // Update palette
-                sCurrentChart.Palette.Advance(visualBeat);
-
-                if (CommonSys.sMain.MainCamera.backgroundColor != sCurrentChart.Palette.BackgroundColor)
-                    SetBackgroundColor(sCurrentChart.Palette.BackgroundColor);
-
-                if (SongNameLabel.color != sCurrentChart.Palette.InterfaceColor)
-                    SetInterfaceColor(sCurrentChart.Palette.InterfaceColor);
-
-                for (var a = 0; a < LaneStyles.Count; a++)
-                {
-                    sCurrentChart.Palette.LaneStyles[a].Advance(visualBeat);
-                    LaneStyles[a].Update(sCurrentChart.Palette.LaneStyles[a]);
-
-                    if (sCurrentChart.Palette.LaneStyles[a].LaneColor.a != 0 && TransparentMeshLaneIndexes.Contains(a))
-                        TransparentMeshLaneIndexes.Remove(a);
-                    else if (sCurrentChart.Palette.LaneStyles[a].LaneColor.a == 0 && !TransparentMeshLaneIndexes.Contains(a))
-                        TransparentMeshLaneIndexes.Add(a);
-                }
-
-                for (var a = 0; a < HitStyles.Count; a++)
-                {
-                    sCurrentChart.Palette.HitStyles[a].Advance(visualBeat);
-                    HitStyles[a].Update(sCurrentChart.Palette.HitStyles[a]);
-                }
-
-                // Advance camera storyboard state
-                sCurrentChart.Camera.Advance(visualBeat);
-
-                // Visual lerp: exponential smoothing on camera transforms so movement is
-                // fluid regardless of frame rate. First frame snaps directly to avoid
-                // lerping from an uninitialised state.
-                const float CameraLerpSpeed = 25f;
-                Vector3    targetCamPos  = sCurrentChart.Camera.CameraPivot;
-                Quaternion targetCamRot  = Quaternion.Euler(sCurrentChart.Camera.CameraRotation);
-                float      targetCamDist = sCurrentChart.Camera.PivotDistance;
-
-                if (!_VisualLerpInitialised)
-                {
-                    _LerpedCameraPos  = targetCamPos;
-                    _LerpedCameraRot  = targetCamRot;
-                    _LerpedCameraDist = targetCamDist;
-                    _VisualLerpInitialised = true;
-                }
-                else
-                {
-                    float t = 1f - Mathf.Exp(-CameraLerpSpeed * Time.unscaledDeltaTime);
-                    _LerpedCameraPos  = Vector3.Lerp(_LerpedCameraPos, targetCamPos, t);
-                    _LerpedCameraRot  = Quaternion.Slerp(_LerpedCameraRot, targetCamRot, t);
-                    _LerpedCameraDist = Mathf.Lerp(_LerpedCameraDist, targetCamDist, t);
-                }
-
-                Camera pseudoCamera = CommonSys.sMain.MainCamera;
-                pseudoCamera.transform.position = _LerpedCameraPos;
-                pseudoCamera.transform.rotation = _LerpedCameraRot;
-                pseudoCamera.transform.Translate(Vector3.back * _LerpedCameraDist);
-
-                // Update scene
-                foreach (LaneGroupPlayer group in LaneGroups)
-                    group.UpdateSelf(visualTime, visualBeat);
-
-                StartCoroutine(f_laneUpdater(visualTime, visualBeat));
-            }
-
             // Show ending animation; the failsafe on bugs is on following:
             // Remaining total hitobject AND Current input's hold -> Remaining lane count -> End of song
             if (((HitsRemaining <= 0 && PlayerInputManager.sInstance.HoldQueue.Count == 0) || Lanes.Count == 0 || (float)CurrentTime / Music.clip.length >= 1) && !ResultExec)
@@ -874,70 +791,131 @@ namespace JANOARG.Client.Behaviors.Player
                 PlayerScreenResult.sMain.StartEndingAnim();
                 ResultExec = true;
             }
+        }
 
-            IEnumerator f_laneUpdater(float time, float beat)
+        public void LateUpdate()
+        {
+            if (!IsPlaying)
+                return;
+
+#if UNITY_EDITOR
+            if (EditorApplication.isPaused) return;
+#endif
+
+            // Update song progress slider
+            SongProgress.value = (float)(CurrentTime / Music.clip.length);
+
+            // Your code break things, great job :thumbs_up:
+
+            float visualTime = (float)CurrentTime + Settings.VisualOffset;
+            float visualBeat = sTargetSong.Timing.ToBeat(visualTime);
+
+            // Update palette
+            sCurrentChart.Palette.Advance(visualBeat);
+
+            if (CommonSys.sMain.MainCamera.backgroundColor != sCurrentChart.Palette.BackgroundColor)
+                SetBackgroundColor(sCurrentChart.Palette.BackgroundColor);
+
+            if (SongNameLabel.color != sCurrentChart.Palette.InterfaceColor)
+                SetInterfaceColor(sCurrentChart.Palette.InterfaceColor);
+
+            for (var a = 0; a < LaneStyles.Count; a++)
             {
-                for (int i = Lanes.Count - 1; i >= 0; i--) // Iterate backwards
+                sCurrentChart.Palette.LaneStyles[a]
+                    .Advance(visualBeat);
+
+                LaneStyles[a]
+                    .Update(sCurrentChart.Palette.LaneStyles[a]);
+
+                if (sCurrentChart.Palette.LaneStyles[a].LaneColor.a != 0 && TransparentMeshLaneIndexes.Contains(a))
+                    TransparentMeshLaneIndexes.Remove(a);
+                else if (sCurrentChart.Palette.LaneStyles[a].LaneColor.a == 0 && !TransparentMeshLaneIndexes.Contains(a))
+                    TransparentMeshLaneIndexes.Add(a);
+            }
+
+            for (var a = 0; a < HitStyles.Count; a++)
+            {
+                sCurrentChart.Palette.HitStyles[a]
+                    .Advance(visualBeat);
+
+                HitStyles[a]
+                    .Update(sCurrentChart.Palette.HitStyles[a]);
+            }
+
+            // Update camera
+            sCurrentChart.Camera.Advance(visualBeat);
+
+            // Visual lerp disabled — update camera directly each frame.
+            // Lerp fields kept for potential future re-enable.
+            // const float CameraLerpSpeed = 12f;
+            // float t = 1f - Mathf.Exp(-CameraLerpSpeed * Time.unscaledDeltaTime);
+            // _LerpedCameraPos  = Vector3.Lerp(_LerpedCameraPos, sCurrentChart.Camera.CameraPivot, t);
+            // _LerpedCameraRot  = Quaternion.Slerp(_LerpedCameraRot, Quaternion.Euler(sCurrentChart.Camera.CameraRotation), t);
+            // _LerpedCameraDist = Mathf.Lerp(_LerpedCameraDist, sCurrentChart.Camera.PivotDistance, t);
+
+            Camera pseudoCamera = CommonSys.sMain.MainCamera;
+            pseudoCamera.transform.position = sCurrentChart.Camera.CameraPivot;
+            pseudoCamera.transform.eulerAngles = sCurrentChart.Camera.CameraRotation;
+            pseudoCamera.transform.Translate(Vector3.back * sCurrentChart.Camera.PivotDistance);
+
+            // Update scene
+            foreach (LaneGroupPlayer group in LaneGroups)
+                group.UpdateSelf(visualTime, visualBeat);
+
+            // Lane update — direct loop, no coroutine needed here
+            for (int i = Lanes.Count - 1; i >= 0; i--)
+            {
+                try
                 {
-                    try
+                    LanePlayer lane = Lanes[i];
+
+                    if (!f_hasTrivialLocalLaneMotion(lane) && lane.TimeStamps[0] - 5f > (float)visualTime)
+                        continue;
+
+                    lane.UpdateSelf(visualTime, visualBeat);
+
+                    if (lane.MarkedForRemoval || lane == null)
                     {
-                        LanePlayer lane = Lanes[i];
-
-                        bool hasTrivialLocalLaneMotion = f_hasTrivialLocalLaneMotion(lane);
-
-                        if (!hasTrivialLocalLaneMotion && lane.TimeStamps[0] - 5f > (float)time)
-                            continue;
-
-                        lane.UpdateSelf(time, beat);
-
-                        if (lane.MarkedForRemoval || lane == null)
-                        {
-                            Lanes.RemoveAt(i); // More efficient than Remove()
-                            Debug.Log($"[LaneRemove] Removed lane {i} from scene.");
-                        }
-                    }
-                    catch (MissingReferenceException)
-                    {
-                        Debug.LogWarning($"[LaneRemove] Lane {i} is null.");
                         Lanes.RemoveAt(i);
+                        Debug.Log($"[LaneRemove] Removed lane {i} from scene.");
                     }
                 }
-
-                yield return null;
-
-                static bool f_hasTrivialLocalLaneMotion(LanePlayer lane)
+                catch (MissingReferenceException)
                 {
-                    
-                    if (lane.Current == null) return true; // not yet initialized, don't gate it
-                    
-                    const float TRIVIAL_LANE_SPAN_THRESHOLD     = 2f;
-                    
-                    IReadOnlyList<LaneStep> laneSteps = lane.Current.LaneSteps;
-                    if (laneSteps.Count <= 1) return true;
-
-                    float span = Math.Abs(laneSteps[^1].Offset - laneSteps[0].Offset);
-                    bool hasShortSpan = span < TRIVIAL_LANE_SPAN_THRESHOLD;
-                    // TODO: Check if this operation is expensive enough to require a cached flag on load time
-                    bool isGeometryLane = laneSteps.All(s => s.Speed == 0);
-
-                    return hasShortSpan || isGeometryLane;
-                    
+                    Debug.LogWarning($"[LaneRemove] Lane {i} is null.");
+                    Lanes.RemoveAt(i);
                 }
             }
+
+            static bool f_hasTrivialLocalLaneMotion(LanePlayer lane)
+            {
+                if (lane.Current == null) return true;
+
+                const float TRIVIAL_LANE_SPAN_THRESHOLD = 2f;
+
+                IReadOnlyList<LaneStep> laneSteps = lane.Current.LaneSteps;
+
+                if (laneSteps.Count <= 1) return true;
+
+                float span = Math.Abs(laneSteps[^1].Offset - laneSteps[0].Offset);
+                bool hasShortSpan = span < TRIVIAL_LANE_SPAN_THRESHOLD;
+
+                // TODO: Check if this operation is expensive enough to require a cached flag on load time
+                bool isGeometryLane = laneSteps.All(s => s.Speed == 0);
+
+                return hasShortSpan || isGeometryLane;
+            }
+            
         }
 
         public void Resync()
         {
             _LastDSPTime = AudioSettings.dspTime;
+
             // Re-anchor CurrentTime to audio if it's playing, so pause/resume is seamless
             if (Music.isPlaying && CurrentTime >= 0)
                 CurrentTime = (double)Music.timeSamples / Music.clip.frequency;
         }
-
-        // Input and hold mesh updates are now handled directly in Update to avoid +1 frame latency.
-        // CheckHitObjects kept as a no-op stub in case external callers reference it.
-        public IEnumerator CheckHitObjects() { yield return null; }
-
         private Coroutine _JudgeAnimation;
 
         public void AddScore(float score, float? acc)
