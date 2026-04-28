@@ -81,14 +81,15 @@ MonoBehaviour:
   MeshRenderer: {fileID: 1454709075641574733}
   Group: {fileID: 0}
   JudgeLine: {fileID: 6481578961853879216}
-  JudgeLeft: {fileID: 785496254211283140}
-  JudgeRight: {fileID: 2328128789803866892}
-  Positions: []
-  Times: []
+  JudgePointLeft: {fileID: 2328128789803866892}
+  JudgePointRight: {fileID: 785496254211283140}
+  PositionPoints: []
+  TimeStamps: []
   CurrentPosition: 0
   HitObjects: []
   HitCoords: []
   LaneStepDirty: 0
+  MarkedForRemoval: 0
   references:
     version: 2
     RefIds: []
@@ -135,7 +136,7 @@ MeshRenderer:
   m_PrefabInstance: {fileID: 0}
   m_PrefabAsset: {fileID: 0}
   m_GameObject: {fileID: 5946676210914727838}
-  m_Enabled: 1
+  m_Enabled: 0
   m_CastShadows: 1
   m_ReceiveShadows: 1
   m_DynamicOccludee: 1
@@ -227,7 +228,7 @@ MeshRenderer:
   m_PrefabInstance: {fileID: 0}
   m_PrefabAsset: {fileID: 0}
   m_GameObject: {fileID: 8233168802795684044}
-  m_Enabled: 1
+  m_Enabled: 0
   m_CastShadows: 1
   m_ReceiveShadows: 1
   m_DynamicOccludee: 1
@@ -332,7 +333,7 @@ MeshRenderer:
   m_PrefabInstance: {fileID: 0}
   m_PrefabAsset: {fileID: 0}
   m_GameObject: {fileID: 8367564778976398389}
-  m_Enabled: 1
+  m_Enabled: 0
   m_CastShadows: 1
   m_ReceiveShadows: 1
   m_DynamicOccludee: 1
@@ -436,7 +437,7 @@ MeshRenderer:
   m_PrefabInstance: {fileID: 0}
   m_PrefabAsset: {fileID: 0}
   m_GameObject: {fileID: 9159259363182995755}
-  m_Enabled: 1
+  m_Enabled: 0
   m_CastShadows: 1
   m_ReceiveShadows: 1
   m_DynamicOccludee: 1

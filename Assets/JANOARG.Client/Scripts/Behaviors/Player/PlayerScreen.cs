@@ -87,6 +87,7 @@ namespace JANOARG.Client.Behaviors.Player
         public HitPlayer         HitSample;
         public MeshRenderer      HoldSample;
         public JudgeScreenEffect JudgeScreenSample;
+        public MeshFilter        CombinedLaneRenderer;
 
         [Space]
         public Mesh FreeFlickIndicator;
