@@ -88,6 +88,7 @@ namespace JANOARG.Client.Behaviors.Player
         public MeshRenderer      HoldSample;
         public JudgeScreenEffect JudgeScreenSample;
         public MeshFilter        CombinedLaneRenderer;
+        public MeshFilter        CombinedJudgeRenderer;
 
         [Space]
         public Mesh FreeFlickIndicator;
@@ -336,6 +337,16 @@ namespace JANOARG.Client.Behaviors.Player
                         TransparentMeshLaneIndexes.Add(i);
 
                     TransparentMeshLaneIndexes.Remove(-1);
+
+                // Initialise combined meshes.
+                _combinedLaneMesh  = new Mesh { name = "CombinedLaneMesh"  }; _combinedLaneMesh.MarkDynamic();
+                _combinedJudgeMesh = new Mesh { name = "CombinedJudgeMesh" }; _combinedJudgeMesh.MarkDynamic();
+                CombinedLaneRenderer.mesh  = _combinedLaneMesh;
+                CombinedJudgeRenderer.mesh = _combinedJudgeMesh;
+                CombinedLaneRenderer.GetComponent<MeshRenderer>().sharedMaterials =
+                    LaneStyles.Select(s => s.LaneMaterial).ToArray();
+                CombinedJudgeRenderer.GetComponent<MeshRenderer>().sharedMaterials =
+                    LaneStyles.Select(s => s.JudgeMaterial).ToArray();
                 }
 
                 foreach (HitStyle style in sCurrentChart.Palette.HitStyles)
@@ -895,6 +906,8 @@ namespace JANOARG.Client.Behaviors.Player
                 }
             }
 
+            BuildCombinedMesh();
+
             static bool f_hasTrivialLocalLaneMotion(LanePlayer lane)
             {
                 if (lane.Current == null) return true;
@@ -913,6 +926,74 @@ namespace JANOARG.Client.Behaviors.Player
                 return hasShortSpan || isGeometryLane;
             }
             
+        }
+
+        // -----------------------------------------------------------------------
+        // Combined mesh state
+        // -----------------------------------------------------------------------
+
+        private Mesh _combinedLaneMesh;
+        private Mesh _combinedJudgeMesh;
+
+        private readonly List<Vector3> _combVerts = new(65536);
+
+        private void BuildCombinedMesh()
+        {
+            int styleCount = LaneStyles.Count;
+
+            // --- Lane body ---------------------------------------------------
+            _combinedLaneMesh.Clear(false);
+            _combinedLaneMesh.subMeshCount = styleCount;
+
+            _combVerts.Clear();
+            var laneTrisByStyle = new List<int>[styleCount];
+            for (int si = 0; si < styleCount; si++) laneTrisByStyle[si] = new List<int>();
+
+            foreach (LanePlayer lane in Lanes)
+            {
+                int si = lane.StyleIndex;
+                if (si < 0 || si >= styleCount) continue;
+                if (TransparentMeshLaneIndexes.Contains(si) && lane.HitObjects.Count == 0) continue;
+
+                int vBase = _combVerts.Count;
+                _combVerts.AddRange(lane.Verts);
+                foreach (int t in lane.Tris)
+                    laneTrisByStyle[si].Add(t + vBase);
+            }
+
+            if (_combVerts.Count > 0)
+            {
+                _combinedLaneMesh.SetVertices(_combVerts);
+                for (int si = 0; si < styleCount; si++)
+                    _combinedLaneMesh.SetTriangles(laneTrisByStyle[si], si, si == styleCount - 1);
+            }
+
+            // --- Judge line ribbons ------------------------------------------
+            _combinedJudgeMesh.Clear(false);
+            _combinedJudgeMesh.subMeshCount = styleCount;
+
+            _combVerts.Clear();
+            var judgeTrisByStyle = new List<int>[styleCount];
+            for (int si = 0; si < styleCount; si++) judgeTrisByStyle[si] = new List<int>();
+
+            foreach (LanePlayer lane in Lanes)
+            {
+                int si = lane.StyleIndex;
+                if (si < 0 || si >= styleCount) continue;
+                if (!lane.JudgeLineActive) continue;
+
+                int vBase = _combVerts.Count;
+                _combVerts.AddRange(lane.JudgeVerts);
+                foreach (int t in lane.JudgeTris)
+                    judgeTrisByStyle[si].Add(t + vBase);
+            }
+
+            if (_combVerts.Count > 0)
+            {
+                _combinedJudgeMesh.SetVertices(_combVerts);
+                for (int si = 0; si < styleCount; si++)
+                    _combinedJudgeMesh.SetTriangles(judgeTrisByStyle[si], si, si == styleCount - 1);
+            }
         }
 
         public void Resync()

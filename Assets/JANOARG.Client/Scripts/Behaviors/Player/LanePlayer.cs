@@ -35,14 +35,28 @@ namespace JANOARG.Client.Behaviors.Player
         public List<HitScreenCoord> HitCoords  = new();
 
         public bool LaneStepDirty = false;
-        private Mesh          _Mesh;
-        
-        public bool MarkedForRemoval = false; 
+        private Mesh _Mesh;
 
-        // WARNING :
-        // THIS IS NOT THREAD SAFE
-        private readonly List<Vector3> _Verts = new(2048);
-        private readonly List<int>     _Tris  = new(1024);
+        public bool MarkedForRemoval = false;
+
+        // Style index cached at Init() for use by the combined mesh builder in PlayerScreen.
+        public int StyleIndex = -1;
+
+        // Lane body geometry — written each frame by UpdateMesh, read by PlayerScreen combiner.
+        // WARNING: NOT THREAD SAFE
+        public  readonly List<Vector3> Verts      = new(2048);
+        public  readonly List<int>     Tris       = new(1024);
+
+        // Judge line ribbon geometry — separate lists for a different submesh/material.
+        public  readonly List<Vector3> JudgeVerts = new(16);
+        public  readonly List<int>     JudgeTris  = new(16);
+
+        // Whether the judge line is active this frame (time inside this lane's body).
+        public bool JudgeLineActive = false;
+
+        // Private aliases so existing internal code compiles unchanged.
+        private List<Vector3> _Verts => Verts;
+        private List<int>     _Tris  => Tris;
         
         static readonly ProfilerMarker sr_TimestampRemove = new("Lane UpdateMesh: Remove Timestamps");
         static readonly ProfilerMarker sr_MeshCalc = new("Lane UpdateMesh: Calculate advance");
@@ -67,20 +81,21 @@ namespace JANOARG.Client.Behaviors.Player
             foreach (LaneStep step in Current.LaneSteps) 
                 TimeStamps.Add(_Metronome.ToSeconds(step.Offset));
 
+            StyleIndex = Current.StyleIndex;
+
+            // Lane body + judge line ribbon go into the combined mesh — disable per-lane renderers.
+            MeshRenderer.enabled = false;
+            JudgeLine.enabled    = false;
+
+            // Judge point spheres keep their own MeshRenderers; assign material and leave enabled.
             if (Current.StyleIndex >= 0 && Current.StyleIndex < PlayerScreen.sMain.LaneStyles.Count)
             {
                 LaneStyleManager style = PlayerScreen.sMain.LaneStyles[Current.StyleIndex];
-                MeshRenderer.sharedMaterial = style.LaneMaterial;
-
-                JudgeLine.sharedMaterial =
-                    JudgePointLeft.sharedMaterial =
-                        JudgePointRight.sharedMaterial =
-                            style.JudgeMaterial;
+                JudgePointLeft.sharedMaterial  = style.JudgeMaterial;
+                JudgePointRight.sharedMaterial = style.JudgeMaterial;
             }
             else
             {
-                MeshRenderer.enabled = false;
-                JudgeLine.gameObject.SetActive(false);
                 JudgePointLeft.gameObject.SetActive(false);
                 JudgePointRight.gameObject.SetActive(false);
             }
@@ -272,20 +287,30 @@ namespace JANOARG.Client.Behaviors.Player
                 // so add its start and end point to the line list
                 f_addLine(startPoint, endPoint);
                 
-                // Enable judgment line if it's scrolling inside this lane body
-                JudgeLine.enabled =
-                    JudgePointLeft.enabled =
-                        JudgePointRight.enabled =
-                            TimeStamps.Count >= 2 && time >= TimeStamps[0] && time < TimeStamps[1];
-                
-                // If the judgment line is enabled, update its current position
-                Transform judgeLineTransform = JudgeLine.transform;
-                judgeLineTransform.localPosition = (startPoint + endPoint) / 2;
-                judgeLineTransform.localScale = new Vector3(f_vec2Distance(startPoint, endPoint), .05f, .05f);
-                judgeLineTransform.localRotation = Quaternion.Euler(0, 0, f_signedAngle(Vector2.right, endPoint - startPoint));
+                // Judge line active when time is inside this lane body's span.
+                JudgeLineActive = TimeStamps.Count >= 2 && time >= TimeStamps[0] && time < TimeStamps[1];
 
-                JudgePointLeft.transform.localPosition = startPoint;
+                // Update judge point sphere positions (they keep their own MeshRenderers).
+                JudgePointLeft.transform.localPosition  = startPoint;
                 JudgePointRight.transform.localPosition = endPoint;
+
+                // Write judge line ribbon into JudgeVerts/JudgeTris for the combined mesh.
+                JudgeVerts.Clear();
+                JudgeTris.Clear();
+
+                if (JudgeLineActive)
+                {
+                    const float judgeHalfThickness = 0.025f;
+                    Vector3 along = (endPoint - startPoint).normalized;
+                    Vector3 perp  = new Vector3(-along.y, along.x, 0) * judgeHalfThickness;
+
+                    JudgeVerts.Add(startPoint - perp);
+                    JudgeVerts.Add(startPoint + perp);
+                    JudgeVerts.Add(endPoint   + perp);
+                    JudgeVerts.Add(endPoint   - perp);
+                    JudgeTris.Add(0); JudgeTris.Add(1); JudgeTris.Add(2);
+                    JudgeTris.Add(0); JudgeTris.Add(2); JudgeTris.Add(3);
+                }
             }
             sr_MeshLerper.End();
             
@@ -380,12 +405,7 @@ namespace JANOARG.Client.Behaviors.Player
             if (isInvisibleMesh && HitObjects.Count == 0)
                 return;
             
-            sr_MeshUpdater.Begin();
-            // Actually update mesh data
-            _Mesh.Clear(false);
-            _Mesh.SetVertices(_Verts);
-            _Mesh.SetTriangles(_Tris, 0, true);
-            sr_MeshUpdater.End();
+            // Mesh upload handled by PlayerScreen.BuildCombinedMesh() after all lanes update.
         }
 
         private float _HitObjectTime   = float.NaN;
