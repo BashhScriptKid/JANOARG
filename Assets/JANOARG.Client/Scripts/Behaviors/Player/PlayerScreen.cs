@@ -343,10 +343,10 @@ namespace JANOARG.Client.Behaviors.Player
                 _combinedJudgeMesh = new Mesh { name = "CombinedJudgeMesh" }; _combinedJudgeMesh.MarkDynamic();
                 CombinedLaneRenderer.mesh  = _combinedLaneMesh;
                 CombinedJudgeRenderer.mesh = _combinedJudgeMesh;
-                CombinedLaneRenderer.GetComponent<MeshRenderer>().sharedMaterials =
-                    LaneStyles.Select(s => s.LaneMaterial).ToArray();
-                CombinedJudgeRenderer.GetComponent<MeshRenderer>().sharedMaterials =
-                    LaneStyles.Select(s => s.JudgeMaterial).ToArray();
+                _cachedLaneMats  = LaneStyles.Select(s => s.LaneMaterial).ToArray();
+                _cachedJudgeMats = LaneStyles.Select(s => s.JudgeMaterial).ToArray();
+                CombinedLaneRenderer.GetComponent<MeshRenderer>().sharedMaterials  = _cachedLaneMats;
+                CombinedJudgeRenderer.GetComponent<MeshRenderer>().sharedMaterials = _cachedJudgeMats;
                 }
 
                 foreach (HitStyle style in sCurrentChart.Palette.HitStyles)
@@ -934,12 +934,30 @@ namespace JANOARG.Client.Behaviors.Player
 
         private Mesh _combinedLaneMesh;
         private Mesh _combinedJudgeMesh;
+        private Material[] _cachedLaneMats;
+        private Material[] _cachedJudgeMats;
 
         private readonly List<Vector3> _combVerts = new(65536);
 
         private void BuildCombinedMesh()
         {
             int styleCount = LaneStyles.Count;
+
+            // Re-sync materials — LaneStyleManager.Update() may swap material instances
+            // when palette storyboard changes. Refresh cached arrays only when stale.
+            for (int i = 0; i < styleCount; i++)
+            {
+                if (_cachedLaneMats[i] != LaneStyles[i].LaneMaterial)
+                {
+                    _cachedLaneMats[i]  = LaneStyles[i].LaneMaterial;
+                    CombinedLaneRenderer.GetComponent<MeshRenderer>().sharedMaterials = _cachedLaneMats;
+                }
+                if (_cachedJudgeMats[i] != LaneStyles[i].JudgeMaterial)
+                {
+                    _cachedJudgeMats[i]  = LaneStyles[i].JudgeMaterial;
+                    CombinedJudgeRenderer.GetComponent<MeshRenderer>().sharedMaterials = _cachedJudgeMats;
+                }
+            }
 
             // --- Lane body ---------------------------------------------------
             _combinedLaneMesh.Clear(false);
