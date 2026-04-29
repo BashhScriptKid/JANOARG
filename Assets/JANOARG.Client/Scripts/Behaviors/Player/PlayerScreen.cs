@@ -1101,7 +1101,7 @@ namespace JANOARG.Client.Behaviors.Player
             
             double offsetAbs = Math.Abs(offset);
             float? accuracy = null;
-            int finalScore;
+            float finalScore;
 
             // Handle different hit evaluation types
             if (isFlickable || isCatchType)
@@ -1116,11 +1116,11 @@ namespace JANOARG.Client.Behaviors.Player
             }
             else
             {
-                // Gradual accuracy evaluation
                 accuracy = CalculateAccuracy(offset, offsetAbs);
-                finalScore = Mathf.RoundToInt(baseScore * (1 - Mathf.Abs(accuracy.Value)));
+                finalScore = baseScore * (1 - Mathf.Abs(accuracy.Value));
                 
                 AddScore(finalScore, accuracy);
+                
                 HitObjectHistory.Add(new HitObjectHistoryItem(hitObject, offset));
             }
 
