@@ -6824,6 +6824,41 @@ Canvas:
   m_SortingLayerID: 0
   m_SortingOrder: 0
   m_TargetDisplay: 0
+--- !u!1 &830593327
+GameObject:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  serializedVersion: 6
+  m_Component:
+  - component: {fileID: 830593328}
+  m_Layer: 5
+  m_Name: Cursor cue
+  m_TagString: Untagged
+  m_Icon: {fileID: 0}
+  m_NavMeshLayer: 0
+  m_StaticEditorFlags: 0
+  m_IsActive: 1
+--- !u!224 &830593328
+RectTransform:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 830593327}
+  m_LocalRotation: {x: 0, y: 0, z: 0, w: 1}
+  m_LocalPosition: {x: 0, y: 0, z: 0}
+  m_LocalScale: {x: 1, y: 1, z: 1}
+  m_ConstrainProportionsScale: 0
+  m_Children: []
+  m_Father: {fileID: 1551788790}
+  m_LocalEulerAnglesHint: {x: 0, y: 0, z: 0}
+  m_AnchorMin: {x: 0.5, y: 0.5}
+  m_AnchorMax: {x: 0.5, y: 0.5}
+  m_AnchoredPosition: {x: 0, y: 0}
+  m_SizeDelta: {x: 100, y: 100}
+  m_Pivot: {x: 0.5, y: 0.5}
 --- !u!1 &860655458
 GameObject:
   m_ObjectHideFlags: 0
@@ -12352,6 +12387,7 @@ GameObject:
   - component: {fileID: 1551788787}
   - component: {fileID: 1551788791}
   - component: {fileID: 1551788792}
+  - component: {fileID: 1551788795}
   - component: {fileID: 1551788793}
   - component: {fileID: 1551788794}
   m_Layer: 5
@@ -12440,6 +12476,7 @@ RectTransform:
   - {fileID: 324592700}
   - {fileID: 830500997}
   - {fileID: 150717747}
+  - {fileID: 830593328}
   - {fileID: 1192416083}
   - {fileID: 1598840471}
   - {fileID: 1463477073}
@@ -12551,6 +12588,7 @@ MonoBehaviour:
   m_EditorClassIdentifier: 
   Player: {fileID: 1551788791}
   Autoplay: 0
+  DesktopInput: 0
   UpdatePerSecond: NaN
   Delta: 21.332ms
   TouchClassesCount: 0
@@ -12583,6 +12621,23 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: ef1ae68e7730bf41ea6964f1f076fbbd, type: 3}
   m_Name: 
   m_EditorClassIdentifier: 
+--- !u!114 &1551788795
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 1551788786}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 7cb452909d5e8f5f9a8522c78a945514, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: 
+  Player: {fileID: 1551788791}
+  InputManager: {fileID: 1551788792}
+  OwnershipCueContainer: {fileID: 1551788790}
+  OwnershipCuePrefab: {fileID: 9041661207644809550, guid: 7df5666577db497f99e1074cb2c292e7, type: 3}
+  ChordGroupingWindowSec: 0.02
 --- !u!1 &1557704231
 GameObject:
   m_ObjectHideFlags: 0

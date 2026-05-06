@@ -114,10 +114,12 @@ namespace JANOARG.Client.Behaviors.Player
                     : 1f;
 
             // Phase 2: inner fill grows — OutCircle
+            // GraphicCircleGPU works the other way; 0 is thin outline, 1 is filled
             if (Fill != null)
             {
                 if (t >= PhaseOneEnd && t < PhaseTwoEnd)
-                    Fill.fillAmount = Ease.Get((t - PhaseOneEnd) / (PhaseTwoEnd - PhaseOneEnd), EaseFunction.Circle, EaseMode.Out);
+                    // Possibly nefficient but I'll leave this to you for optimisation
+                    Fill.fillAmount = 1 - Ease.Get((t - PhaseOneEnd) / (PhaseTwoEnd - PhaseOneEnd), EaseFunction.Circle, EaseMode.Out);
                 else if (t >= PhaseTwoEnd)
                     Fill.fillAmount = 1f;
             }
