@@ -398,15 +398,6 @@ public class PlayerInputManager : MonoBehaviour
                     AssignedTouch = touch
                 });
 
-            // Notify PC input manager so the hold note enters the mouse ownership queue.
-            if (PCInputManager.sInstance != null)
-            {
-                LaneStep laneStep = touch.QueuedHit.Lane?.Current?.LaneSteps?.Count > 0
-                    ? touch.QueuedHit.Lane.Current.LaneSteps[0]
-                    : null;
-                PCInputManager.sInstance.EnqueueMouseCandidate(touch.QueuedHit, laneStep);
-            }
-
             //Debug.Log("Hold hitobject head handled, passing to hold queue.");
         }
     }
@@ -422,21 +413,17 @@ public class PlayerInputManager : MonoBehaviour
                     holdPassDrainValue = missed ? 0 : 1
                 });
 
-            // Notify PC input manager so the hold note enters the mouse ownership queue.
-            if (PCInputManager.sInstance != null)
-            {
-                LaneStep laneStep = hitObject.Lane?.Current?.LaneSteps?.Count > 0
-                    ? hitObject.Lane.Current.LaneSteps[0]
-                    : null;
-                PCInputManager.sInstance.EnqueueMouseCandidate(hitObject, laneStep);
-            }
-
             //Debug.Log("Hold hitobject head handled, passing to hold queue.");
         }
     }
     
     public void UpdateInput() // Main input thread
     {
+        if (DesktopInput)
+        {
+            PCInputManager.sInstance?.UpdateInput();
+            return;
+        }
 
         double currentTimeMs = Player.CurrentTime * 1000.0;
 
@@ -462,7 +449,7 @@ public class PlayerInputManager : MonoBehaviour
         {
             InitLogger("Autoplay: OFF");
 
-            int inputCount = DesktopInput ? 0 : Touch.activeTouches.Count; // Desktop input: skip touch pipeline
+            int inputCount = Touch.activeTouches.Count;
 
             float screenDpi =
                 Screen.dpi > 0
@@ -472,7 +459,7 @@ public class PlayerInputManager : MonoBehaviour
             float flickThreshold = screenDpi * 0.2f; // 20% of screen dpi (about 0.5cm)
             InitLogger($"Set flick threshold to {flickThreshold}px (DPI: {screenDpi})");
 
-            // Main touch iterator (skipped when DesktopInput is active)
+            // Main touch iterator
             for (var a = 0; a < inputCount; a++)
             {
                 Touch inputEntry = Touch.activeTouches[a];
