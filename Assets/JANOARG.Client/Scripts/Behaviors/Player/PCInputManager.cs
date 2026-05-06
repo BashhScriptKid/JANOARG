@@ -162,16 +162,15 @@ public class PCInputManager : MonoBehaviour
             {
                 HitobjectProcessor(hitobject, hitobjectTimingDelta, ref alreadyHit);
 
-                // Mark any key that intersects a discrete hitobject as in-range.
+                // Mark all keys as in-range of this discrete hitobject — no cursor gate,
+                // key presence alone is the input signal.
                 if (isDiscrete)
                 {
                     foreach (KeyClass key in KeyClasses.Values)
-                        if (Vector2.Distance(CursorPos(), hitobject.HitCoord.Position)
-                            <= hitobject.HitCoord.Radius)
-                        {
-                            key.DiscreteHitobjectIsInRange = true;
-                            key.NearestDiscreteHitobject   = hitobject;
-                        }
+                    {
+                        key.DiscreteHitobjectIsInRange = true;
+                        key.NearestDiscreteHitobject   = hitobject;
+                    }
                 }
 
                 // Pass to DiscreteHitQueue
@@ -275,7 +274,8 @@ public class PCInputManager : MonoBehaviour
                 );
                 key.QueuedHit.IsProcessed = true;
                 EnqueueHoldNote(key.QueuedHit);
-                key.QueuedHit = null;
+                key.QueuedHit         = null;
+                key.QueuedHitDistance = 0;
             }
 
             key.Initial = false; // Initial only lasts one tick.
@@ -298,24 +298,22 @@ public class PCInputManager : MonoBehaviour
         switch (hitobject.Current.Type)
         {
             case HitObject.HitType.Normal:
-                // Each Initial key scans for the nearest note by hitbox proximity —
-                // exactly like each new touch finger does.
+                // Any Initial key claims the next note in timing window — purely key-based,
+                // no cursor proximity. Discrete tap-protection is preserved (same logic as
+                // touch pipeline) since a catch note arriving just before a tap note should
+                // still gate correctly.
                 foreach (KeyClass key in KeyClasses.Values)
                 {
                     if (!key.Initial) continue;
 
-                    float distance = Vector2.Distance(CursorPos(), hitobject.HitCoord.Position);
-
                     var discreteTapProtectionPassed = false;
 
-                    if (distance < hitobject.HitCoord.Radius &&
-                        (discreteTapProtectionPassed =
+                    if ((discreteTapProtectionPassed =
                             !(key.DiscreteHitobjectIsInRange &&
                               key.NearestDiscreteHitobject != null &&
                               key.NearestDiscreteHitobject.Current.Type == HitObject.HitType.Catch &&
                               key.NearestDiscreteHitobject.Time < hitobject.Time &&
                               hitobject.Time >= -Player.GoodWindow &&
-                              Vector2.Distance(CursorPos(), key.NearestDiscreteHitobject.HitCoord.Position) < distance &&
                               hitobject.Time - key.NearestDiscreteHitobject.Time <= Player.GoodWindow * 2
                             ) ||
                             (key.DiscreteHitobjectIsInRange &&
@@ -328,15 +326,11 @@ public class PCInputManager : MonoBehaviour
                                   hitobject.HitCoord.Radius / 2)
                              ))
                         ) &&
-                        (!key.QueuedHit ||
-                         hitobject.Time < key.QueuedHit.Time ||
-                         (Mathf.Approximately(hitobject.Time, key.QueuedHit.Time) &&
-                          distance < key.QueuedHitDistance))
+                        !key.QueuedHit // Each key claims at most one note per press.
                        )
                     {
-                        key.QueuedHit         = hitobject;
-                        key.QueuedHitDistance = distance;
-                        alreadyHit            = true;
+                        key.QueuedHit = hitobject;
+                        alreadyHit    = true;
                     }
                 }
                 return;
@@ -351,11 +345,10 @@ public class PCInputManager : MonoBehaviour
                     // Gate: per-key cooldown + cursor proximity.
                     if (!CanKeyClearCatch(key, hitobject)) continue;
 
-                    hitobject.InDiscreteHitQueue          = true;
-                    key.DiscreteHitobjectDistance         = Vector2.Distance(CursorPos(), hitobject.HitCoord.Position);
-                    key.DiscreteHitobjectIsInRange        = true;
-                    key.CatchCooldownExpiry               = Player.CurrentTime + 60f / GetCurrentBPM() / 16f;
-                    alreadyHit                            = true;
+                    hitobject.InDiscreteHitQueue   = true;
+                    key.DiscreteHitobjectIsInRange = true;
+                    key.CatchCooldownExpiry        = Player.CurrentTime + 60f / GetCurrentBPM() / 16f;
+                    alreadyHit                     = true;
                 }
                 return;
         }
