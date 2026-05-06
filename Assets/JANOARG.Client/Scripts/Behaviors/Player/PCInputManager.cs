@@ -47,38 +47,23 @@ public class PCInputManager : MonoBehaviour
 
     // ─── Keyboard state ──────────────────────────────────────────────────────────
 
-    private readonly List<Key>    _ChordBuffer      = new();
-    private double                _ChordWindowStart = double.NegativeInfinity;
-    private bool                  _ChordWindowOpen;
-    private readonly HashSet<Key> _ConsumedKeys     = new();
+    private readonly List<Key>      _ChordBuffer      = new();
+    private double                  _ChordWindowStart = double.NegativeInfinity;
+    private bool                    _ChordWindowOpen;
+    private readonly HashSet<Key>   _ConsumedKeys     = new();
 
     /// <summary>
-    ///     Number of keyboard keys currently held down. > 0 means the player is actively
-    ///     holding, which lets catch notes clear automatically on arrival — mirrors a resting
-    ///     finger on the touchscreen.
+    ///     Live registry of all currently held keys, each wrapped in a <see cref="KeyClass"/>
+    ///     that carries its own state — queued hit, catch cooldown expiry.
+    ///     Mirrors the <c>TouchClasses</c> pattern in <see cref="PlayerInputManager"/>.
     /// </summary>
-    private int _HeldKeyCount;
+    private readonly Dictionary<Key, KeyClass> _HeldKeys = new();
 
     /// <summary>
-    ///     Chord consumed this tick: how many keydown events arrived in the current grouping
-    ///     window. Resets each tick after being applied to the hit queue.
+    ///     Chord events buffered this tick: KeyClass wrappers for keys that were pressed
+    ///     in the current grouping window. Flushed into the hit queue when the window closes.
     /// </summary>
-    private int _PendingChordCount;
-
-    /// <summary>
-    ///     The most recently pressed key this tick. Used to attribute held-catch clears to
-    ///     a specific key for per-key cooldown tracking.
-    /// </summary>
-    private Key _LastPressedKey;
-
-    /// <summary>
-    ///     Per-key cooldown expiry times (game time in seconds). After a key clears a catch
-    ///     note via hold, that key cannot clear another catch note until either:
-    ///     (a) the cooldown expires (BPM/16 seconds), or
-    ///     (b) the next catch note's hitbox intersects the cursor — indicating the notes are
-    ///         close enough that a single input would naturally cover both (no distinct input needed).
-    /// </summary>
-    private readonly Dictionary<Key, double> _CatchCooldownExpiry = new();
+    private readonly List<KeyClass> _PendingChord = new();
 
     // ─── Mouse ownership state ───────────────────────────────────────────────────
 
@@ -140,12 +125,13 @@ public class PCInputManager : MonoBehaviour
 
             if (keyControl.wasPressedThisFrame)
             {
-                _HeldKeyCount++;
-                BufferKeyDown(key);
+                var keyClass = new KeyClass { KeyCode = key, PressTime = Player.CurrentTime };
+                _HeldKeys[key] = keyClass;
+                BufferKeyDown(keyClass);
             }
-            else if (keyControl.wasReleasedThisFrame && _HeldKeyCount > 0)
+            else if (keyControl.wasReleasedThisFrame)
             {
-                _HeldKeyCount--;
+                _HeldKeys.Remove(key);
             }
         }
     }
@@ -153,16 +139,15 @@ public class PCInputManager : MonoBehaviour
     /// <summary>Called by upstream layers (system, UI) to prevent a key reaching the chord pool.</summary>
     public void ConsumeKey(Key key) => _ConsumedKeys.Add(key);
 
-    private void BufferKeyDown(Key key)
+    private void BufferKeyDown(KeyClass keyClass)
     {
-        _LastPressedKey = key;
         if (!_ChordWindowOpen)
         {
             _ChordWindowStart = Player.CurrentTime;
             _ChordWindowOpen  = true;
             _ChordBuffer.Clear();
         }
-        _ChordBuffer.Add(key);
+        _ChordBuffer.Add(keyClass.KeyCode);
     }
 
     // ─────────────────────────────────────────────────────────────────────────────
@@ -179,10 +164,18 @@ public class PCInputManager : MonoBehaviour
         _ConsumedKeys.Clear();
 
         // Flush chord window if it has expired this tick.
-        _PendingChordCount = 0;
+        _PendingChord.Clear();
         if (_ChordWindowOpen && Player.CurrentTime - _ChordWindowStart >= ChordGroupingWindowSec)
         {
-            _PendingChordCount = _ChordBuffer.Count;
+            // Collect KeyClass wrappers for each key in the chord buffer.
+            // Keys that were released before the window closed are gone from _HeldKeys
+            // but we still want to count them — so we snapshot from _ChordBuffer.
+            foreach (Key key in _ChordBuffer)
+                if (_HeldKeys.TryGetValue(key, out KeyClass kc))
+                    _PendingChord.Add(kc);
+                else
+                    _PendingChord.Add(new KeyClass { KeyCode = key, PressTime = _ChordWindowStart });
+
             _ChordBuffer.Clear();
             _ChordWindowOpen = false;
         }
@@ -193,7 +186,8 @@ public class PCInputManager : MonoBehaviour
         // Mirrors PlayerInputManager's HitQueue loop. N chord keys hit N notes;
         // held keys additionally clear catch notes as they arrive.
 
-        int chordBudget = _PendingChordCount;
+        int chordBudget = _PendingChord.Count;
+        int chordIdx    = 0; // Tracks which KeyClass from _PendingChord consumed this slot.
 
         for (int a = 0; a < InputManager.HitQueue.Count; a++)
         {
@@ -219,20 +213,26 @@ public class PCInputManager : MonoBehaviour
 
                 if (!hit.Current.Flickable)
                 {
-                    // Chord keypress consumes any note type (Normal or Catch).
+                    // Chord keypress — each key in the chord independently claims one note.
                     if (chordBudget > 0)
                     {
-                        HitNote(hit, delta);
+                        KeyClass assignedKey = chordIdx < _PendingChord.Count
+                            ? _PendingChord[chordIdx] : null;
+                        HitNote(hit, delta, assignedKey);
                         chordBudget--;
+                        chordIdx++;
                         consumed = true;
                     }
                     // Held key clears catch notes (resting finger equivalent), gated by
                     // per-key cooldown unless the cursor intersects the note's hitbox.
-                    else if (_HeldKeyCount > 0 && hit.Current.Type == HitObject.HitType.Catch
-                             && CanHeldKeyClearCatch(hit))
+                    else if (_HeldKeys.Count > 0 && hit.Current.Type == HitObject.HitType.Catch)
                     {
-                        HitNote(hit, delta, heldKey: _LastPressedKey);
-                        consumed = true;
+                        KeyClass bestKey = FindBestHeldKeyForCatch(hit);
+                        if (bestKey != null)
+                        {
+                            HitNote(hit, delta, bestKey);
+                            consumed = true;
+                        }
                     }
                 }
 
@@ -295,15 +295,17 @@ public class PCInputManager : MonoBehaviour
                 double delta = judgementOffsetTime - hit.Time;
 
                 bool inWindow  = judgementOffsetTime >= hit.Time;
-                bool heldClear = _HeldKeyCount > 0 && Math.Abs(delta) <= Player.PassWindow
-                                 && CanHeldKeyClearCatch(hit);
+                KeyClass heldKeyForCatch = null;
+                if (_HeldKeys.Count > 0 && Math.Abs(delta) <= Player.PassWindow)
+                    heldKeyForCatch = FindBestHeldKeyForCatch(hit);
+                bool heldClear = heldKeyForCatch != null;
 
                 if ((inWindow || heldClear) && !hit.IsProcessed)
                 {
                     Player.Hit(hit, delta);
                     hit.InDiscreteHitQueue = false;
                     hit.IsProcessed        = true;
-                    if (heldClear) RecordCatchCooldown(_LastPressedKey);
+                    if (heldClear) heldKeyForCatch.RecordCatchCooldown(Player.CurrentTime, GetCurrentBPM());
                     EnqueueHoldNote(hit);
 
                     if (!hit) continue;
@@ -414,16 +416,20 @@ public class PCInputManager : MonoBehaviour
     // Helpers
     // ─────────────────────────────────────────────────────────────────────────────
 
-    /// <param name="heldKey">
-    ///     If set, this hit was triggered by a held key rather than a new chord keydown.
-    ///     A catch cooldown is recorded against this key after the hit.
+    /// <param name="key">
+    ///     The <see cref="KeyClass"/> responsible for this hit. When the note is a catch
+    ///     cleared by a held key (not a fresh chord press), a cooldown is recorded on it.
+    ///     May be null for autoplay or missed-note forced hits.
     /// </param>
-    private void HitNote(HitPlayer note, double delta, Key heldKey = Key.None)
+    private void HitNote(HitPlayer note, double delta, KeyClass key = null)
     {
         Player.Hit(note, delta);
         note.IsProcessed = true;
-        if (heldKey != Key.None && note.Current.Type == HitObject.HitType.Catch)
-            RecordCatchCooldown(heldKey);
+        // Record catch cooldown only for held-key clears (key already held, not a new press).
+        // Chord presses don't need the cooldown — they're distinct inputs by definition.
+        if (key != null && note.Current.Type == HitObject.HitType.Catch
+                        && key.PressTime < _ChordWindowStart)
+            key.RecordCatchCooldown(Player.CurrentTime, GetCurrentBPM());
         EnqueueHoldNote(note);
     }
 
@@ -456,39 +462,45 @@ public class PCInputManager : MonoBehaviour
     // ─────────────────────────────────────────────────────────────────────────────
 
     /// <summary>
-    ///     Returns true if a held key is permitted to clear <paramref name="note"/>.
-    ///     False when the key is on cooldown AND the cursor does not intersect the note's
-    ///     screen-space hitbox — i.e. it's far enough away to warrant a distinct input.
+    ///     Finds the best currently-held key to clear <paramref name="note"/> as a passive
+    ///     hold-clear, or null if no key passes the cooldown/intersection gate.
+    ///
+    ///     Each held key is checked independently — a key on cooldown is only allowed if
+    ///     the cursor intersects the note's hitbox (notes close enough to share one input).
+    ///     Among eligible keys, prefer the one whose cooldown expired earliest (most "rested").
     /// </summary>
-    private bool CanHeldKeyClearCatch(HitPlayer note)
+    private KeyClass FindBestHeldKeyForCatch(HitPlayer note)
     {
-        Key key = _LastPressedKey;
-
-        // No active cooldown for this key — always allow.
-        if (!_CatchCooldownExpiry.TryGetValue(key, out double expiry)) return true;
-        if (Player.CurrentTime >= expiry) return true;
-
-        // Cooldown active — allow only if cursor intersects the note's hitbox.
-        // The hitbox is a circle: Position (screen midpoint), Radius covering the full span.
-        // This mirrors the straight-line two-point hitbox construction in HoldQueue_Processor.
         Vector2 cursorPos = Mouse.current != null
             ? Mouse.current.position.ReadValue()
-            : note.HitCoord.Position; // No mouse — always intersects (safe fallback).
+            : note.HitCoord.Position;
 
-        return Vector2.Distance(cursorPos, note.HitCoord.Position) <= note.HitCoord.Radius;
+        bool cursorIntersects = Vector2.Distance(cursorPos, note.HitCoord.Position)
+                                <= note.HitCoord.Radius;
+
+        KeyClass best = null;
+        double   bestExpiry = double.MaxValue;
+
+        foreach (KeyClass kc in _HeldKeys.Values)
+        {
+            // Gate: cooldown expired, or cursor intersects hitbox.
+            if (!kc.IsCatchCooldownExpired(Player.CurrentTime) && !cursorIntersects)
+                continue;
+
+            // Prefer whichever key has the earliest (most rested) expiry.
+            double expiry = kc.CatchCooldownExpiry;
+            if (best == null || expiry < bestExpiry)
+            {
+                best       = kc;
+                bestExpiry = expiry;
+            }
+        }
+
+        return best;
     }
 
-    /// <summary>
-    ///     Records a catch cooldown for <paramref name="key"/>.
-    ///     Timeout = 60 / BPM / 16 seconds (one 1/16th note at current tempo).
-    /// </summary>
-    private void RecordCatchCooldown(Key key)
-    {
-        if (key == Key.None) return;
-        float bpm     = PlayerScreen.sTargetSong?.Timing.GetStop((float)Player.CurrentTime, out int _).BPM ?? 120f;
-        float timeout = 60f / bpm / 16f;
-        _CatchCooldownExpiry[key] = Player.CurrentTime + timeout;
-    }
+    private float GetCurrentBPM() =>
+        PlayerScreen.sTargetSong?.Timing.GetStop((float)Player.CurrentTime, out int _).BPM ?? 120f;
 
     private void EnqueueMouseCandidate(HitPlayer note, LaneStep laneStep)
     {
@@ -651,4 +663,37 @@ public class PCOwnershipEntry
     public HitPlayer Note;
     public LaneStep  LaneStep;
     public double    EnqueueTime;
+}
+
+/// <summary>
+///     Stateful wrapper for a single held keyboard key, mirroring the <c>TouchClass</c>
+///     pattern in <see cref="PlayerInputManager"/>. Persists in <c>_HeldKeys</c> from
+///     keydown to keyup, carrying per-key catch cooldown state.
+/// </summary>
+public class KeyClass
+{
+    /// <summary>The physical key this wrapper represents.</summary>
+    public Key KeyCode;
+
+    /// <summary>Game time (seconds) when this key was pressed.</summary>
+    public double PressTime;
+
+    /// <summary>
+    ///     Game time (seconds) at which the catch cooldown for this key expires.
+    ///     <see cref="double.NegativeInfinity"/> means no cooldown is active.
+    /// </summary>
+    public double CatchCooldownExpiry = double.NegativeInfinity;
+
+    /// <summary>Returns true if the catch cooldown has expired at <paramref name="currentTime"/>.</summary>
+    public bool IsCatchCooldownExpired(double currentTime) => currentTime >= CatchCooldownExpiry;
+
+    /// <summary>
+    ///     Stamps a catch cooldown on this key.
+    ///     Timeout = 60 / BPM / 16 seconds (one 1/16th note at current tempo).
+    /// </summary>
+    public void RecordCatchCooldown(double currentTime, float bpm)
+    {
+        float timeout        = 60f / bpm / 16f;
+        CatchCooldownExpiry  = currentTime + timeout;
+    }
 }
