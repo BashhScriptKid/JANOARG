@@ -191,46 +191,46 @@ public class PCInputManager : MonoBehaviour
 
         for (int a = 0; a < InputManager.HitQueue.Count; a++)
         {
-            HitPlayer hit = InputManager.HitQueue[a];
+            HitPlayer hitobject = InputManager.HitQueue[a];
 
-            if (!hit)
+            if (!hitobject)
             {
                 InputManager.HitQueue.RemoveAt(a--);
                 continue;
             }
 
-            double delta = judgementOffsetTime - hit.Time;
+            double delta = judgementOffsetTime - hitobject.Time; // ?? (I doubt this is delta)
 
-            bool isDiscrete = hit.Current.Type == HitObject.HitType.Catch || hit.Current.Flickable;
+            bool isDiscrete = hitobject.Current.Type == HitObject.HitType.Catch || hitobject.Current.Flickable;
             float window    = isDiscrete ? Player.PassWindow : Player.GoodWindow;
 
-            if (hit.Current.HoldLength > 0 && !hit.PendingHoldQueue)
-                hit.PendingHoldQueue = true;
+            if (hitobject.Current.HoldLength > 0 && !hitobject.PendingHoldQueue)
+                hitobject.PendingHoldQueue = true;
 
-            if (delta >= -window && !hit.IsProcessed)
+            if (delta >= -window && !hitobject.IsProcessed)
             {
                 bool consumed = false;
 
-                if (!hit.Current.Flickable)
+                if (!hitobject.Current.Flickable)
                 {
                     // Chord keypress — each key in the chord independently claims one note.
                     if (chordBudget > 0)
                     {
                         KeyClass assignedKey = chordIdx < _PendingChord.Count
                             ? _PendingChord[chordIdx] : null;
-                        HitNote(hit, delta, assignedKey);
+                        HitNote(hitobject, delta, assignedKey);
                         chordBudget--;
                         chordIdx++;
                         consumed = true;
                     }
                     // Held key clears catch notes (resting finger equivalent), gated by
                     // per-key cooldown unless the cursor intersects the note's hitbox.
-                    else if (_HeldKeys.Count > 0 && hit.Current.Type == HitObject.HitType.Catch)
+                    else if (_HeldKeys.Count > 0 && hitobject.Current.Type == HitObject.HitType.Catch)
                     {
-                        KeyClass bestKey = FindBestHeldKeyForCatch(hit);
+                        KeyClass bestKey = FindBestHeldKeyForCatch(hitobject);
                         if (bestKey != null)
                         {
-                            HitNote(hit, delta, bestKey);
+                            HitNote(hitobject, delta, bestKey);
                             consumed = true;
                         }
                     }
@@ -238,19 +238,20 @@ public class PCInputManager : MonoBehaviour
 
                 // Pass non-flickable catch notes to DiscreteHitQueue for timed auto-clear,
                 // consistent with how the touch pipeline handles them.
-                if (!consumed && isDiscrete && !hit.Current.Flickable && !hit.InDiscreteHitQueue)
+                if (!consumed && isDiscrete && !hitobject.Current.Flickable && !hitobject.InDiscreteHitQueue)
                 {
-                    hit.InDiscreteHitQueue = true;
-                    InputManager.DiscreteHitQueue.Add(hit);
+                    hitobject.InDiscreteHitQueue = true;
+                    InputManager.DiscreteHitQueue.Add(hitobject);
                     InputManager.HitQueue.RemoveAt(a--);
                     continue;
                 }
 
+                // Normal tap notes
                 if (!consumed && delta > window)
                 {
-                    Player.Hit(hit, float.PositiveInfinity, false);
-                    hit.IsProcessed = true;
-                    EnqueueHoldNote(hit, missed: true);
+                    Player.Hit(hitobject, float.PositiveInfinity, false);
+                    hitobject.IsProcessed = true;
+                    EnqueueHoldNote(hitobject, missed: true);
                 }
             }
 
@@ -259,7 +260,7 @@ public class PCInputManager : MonoBehaviour
 
         // ── Hold queue processor ──────────────────────────────────────────────
         // Verbatim mirror of PlayerInputManager's hold processor.
-        // IsPlayerHolding is true when any key is currently held (_HeldKeyCount > 0).
+        // IsPlayerHolding is true when any key is currently held (_HeldKeys.Count > 0).
 
         if (InputManager.HoldQueue.Count > 0)
         {
@@ -366,7 +367,7 @@ public class PCInputManager : MonoBehaviour
         };
 
         // IsPlayerHolding: any key held down counts, not a specific touch.
-        holdNoteEntry.IsPlayerHolding = _HeldKeyCount > 0;
+        holdNoteEntry.IsPlayerHolding = _HeldKeys.Count > 0;
 
         holdNoteEntry.holdPassDrainValue = Mathf.Clamp01(
             holdNoteEntry.holdPassDrainValue + Time.deltaTime / Player.PassWindow * (holdNoteEntry.IsPlayerHolding ? 1f : -1f)
@@ -430,18 +431,20 @@ public class PCInputManager : MonoBehaviour
         if (key != null && note.Current.Type == HitObject.HitType.Catch
                         && key.PressTime < _ChordWindowStart)
             key.RecordCatchCooldown(Player.CurrentTime, GetCurrentBPM());
-        EnqueueHoldNote(note);
+        
+        if (note.Current.Length > 0)
+            EnqueueHoldNote(note);
     }
 
     private void EnqueueHoldNote(HitPlayer hitObject, bool missed = false)
     {
         if (!hitObject.PendingHoldQueue) return;
-
+        
         InputManager.HoldQueue.Add(new HoldNoteClass
         {
             HitObject          = hitObject,
             holdPassDrainValue = missed ? 0 : 1,
-            IsPlayerHolding    = _HeldKeyCount > 0,
+            IsPlayerHolding    = _HeldKeys.Count > 0,
         });
 
         // Register with mouse ownership queue if it needs the cursor.
@@ -674,6 +677,11 @@ public class KeyClass
 {
     /// <summary>The physical key this wrapper represents.</summary>
     public Key KeyCode;
+
+    /// <summary>
+    /// A bool that only lasts one update loop. Used for taps
+    /// </summary>
+    public bool Initial;
 
     /// <summary>Game time (seconds) when this key was pressed.</summary>
     public double PressTime;
