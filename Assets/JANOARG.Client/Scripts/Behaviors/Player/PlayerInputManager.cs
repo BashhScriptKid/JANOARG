@@ -294,6 +294,12 @@ public class PlayerInputManager : MonoBehaviour
 
     [Space] public bool Autoplay;
 
+    [Tooltip(
+        "When enabled, keyboard + mouse input is handled by PCInputManager instead of " +
+        "the touch pipeline. Requires a PCInputManager component in the scene. " +
+        "Touch input is suppressed while this is active.")]
+    public bool DesktopInput;
+
     [Space] [ReadOnly] public float UpdatePerSecond = float.NaN;
 
     [ReadOnly]        public string              Delta = s_DeltaTime.ToString("F3") + "ms";
@@ -392,6 +398,15 @@ public class PlayerInputManager : MonoBehaviour
                     AssignedTouch = touch
                 });
 
+            // Notify PC input manager so the hold note enters the mouse ownership queue.
+            if (PCInputManager.sInstance != null)
+            {
+                LaneStep laneStep = touch.QueuedHit.Lane?.Current?.LaneSteps?.Count > 0
+                    ? touch.QueuedHit.Lane.Current.LaneSteps[0]
+                    : null;
+                PCInputManager.sInstance.EnqueueMouseCandidate(touch.QueuedHit, laneStep);
+            }
+
             //Debug.Log("Hold hitobject head handled, passing to hold queue.");
         }
     }
@@ -406,6 +421,15 @@ public class PlayerInputManager : MonoBehaviour
                     HitObject = hitObject,
                     holdPassDrainValue = missed ? 0 : 1
                 });
+
+            // Notify PC input manager so the hold note enters the mouse ownership queue.
+            if (PCInputManager.sInstance != null)
+            {
+                LaneStep laneStep = hitObject.Lane?.Current?.LaneSteps?.Count > 0
+                    ? hitObject.Lane.Current.LaneSteps[0]
+                    : null;
+                PCInputManager.sInstance.EnqueueMouseCandidate(hitObject, laneStep);
+            }
 
             //Debug.Log("Hold hitobject head handled, passing to hold queue.");
         }
@@ -438,7 +462,7 @@ public class PlayerInputManager : MonoBehaviour
         {
             InitLogger("Autoplay: OFF");
 
-            int inputCount = Touch.activeTouches.Count;
+            int inputCount = DesktopInput ? 0 : Touch.activeTouches.Count; // Desktop input: skip touch pipeline
 
             float screenDpi =
                 Screen.dpi > 0
@@ -448,7 +472,7 @@ public class PlayerInputManager : MonoBehaviour
             float flickThreshold = screenDpi * 0.2f; // 20% of screen dpi (about 0.5cm)
             InitLogger($"Set flick threshold to {flickThreshold}px (DPI: {screenDpi})");
 
-            // Main touch iterator
+            // Main touch iterator (skipped when DesktopInput is active)
             for (var a = 0; a < inputCount; a++)
             {
                 Touch inputEntry = Touch.activeTouches[a];
