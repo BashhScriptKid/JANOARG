@@ -11,24 +11,22 @@ using UnityEngine.InputSystem.LowLevel;
 ///     Keyboard + mouse hybrid input manager for JANOARG on PC.
 ///
 ///     <para>Called by <see cref="PlayerInputManager.UpdateInput"/> when
-///     <see cref="PlayerInputManager.DesktopInput"/> is true — it acts as a direct
-///     replacement tick, not a parallel system. No <c>MonoBehaviour.Update</c> of its own.</para>
+///     <see cref="PlayerInputManager.DesktopInput"/> is true — direct replacement tick,
+///     no <c>MonoBehaviour.Update</c>.</para>
 ///
-///     <para><b>Architecture</b> mirrors <see cref="PlayerInputManager"/> directly:
+///     <para><b>Architecture mirrors <see cref="PlayerInputManager"/> low-level flow:</b>
 ///     <list type="bullet">
-///       <item>HitQueue processor loop — N held/pressed keys consume N notes (Normal + Catch).</item>
-///       <item>Hold queue processor — mirrors <see cref="PlayerInputManager.HoldQueue_Processor"/>
-///             verbatim; IsPlayerHolding is driven by whether any key is currently held.</item>
-///       <item>Discrete queue processor — catch notes auto-clear while any key is held.</item>
+///       <item>Each held key is a <see cref="KeyClass"/> (analogous to <c>TouchClass</c>),
+///             persisting from keydown to keyup with its own state.</item>
+///       <item>On keydown, <c>Initial = true</c> for one tick — the key scans the HitQueue
+///             for the nearest note within hitbox and stores it as <c>QueuedHit</c>, exactly
+///             like a new touch finger does. No chord budget; N simultaneous keypresses each
+///             independently claim their note by proximity, which is how chords emerge.</item>
+///       <item>Queued-hit resolver fires all <c>Initial</c> keys' <c>QueuedHit</c>s at the
+///             end of the frame, matching the touch pipeline's resolver.</item>
+///       <item>Held keys (not Initial) handle catch auto-clear via hitbox intersection +
+///             per-key cooldown.</item>
 ///     </list></para>
-///
-///     <para><b>Keyboard:</b> Milthm-style any-key pool. Keys arriving within
-///     <see cref="ChordGroupingWindowSec"/> are merged into a chord of size N. A separate
-///     held-key count lets catch notes clear continuously while any key stays down.</para>
-///
-///     <para><b>Mouse ownership cue:</b> ticked via
-///     <see cref="PCMouseOwnershipCueManager.sMain"/> at the end of each
-///     <see cref="UpdateInput"/> — no canvas reference on this class.</para>
 /// </summary>
 public class PCInputManager : MonoBehaviour
 {
@@ -40,30 +38,15 @@ public class PCInputManager : MonoBehaviour
     public PlayerScreen       Player;
     public PlayerInputManager InputManager;
 
-    [Header("Tuning")]
-    [Tooltip("Chord-grouping window in seconds. Keys pressing within this window are merged " +
-             "into a single chord. Not coupled to any timing window — tune independently.")]
-    public float ChordGroupingWindowSec = 0.020f;
-
     // ─── Keyboard state ──────────────────────────────────────────────────────────
 
-    private readonly List<Key>      _ChordBuffer      = new();
-    private double                  _ChordWindowStart = double.NegativeInfinity;
-    private bool                    _ChordWindowOpen;
-    private readonly HashSet<Key>   _ConsumedKeys     = new();
+    private readonly HashSet<Key>              _ConsumedKeys = new();
 
     /// <summary>
-    ///     Live registry of all currently held keys, each wrapped in a <see cref="KeyClass"/>
-    ///     that carries its own state — queued hit, catch cooldown expiry.
-    ///     Mirrors the <c>TouchClasses</c> pattern in <see cref="PlayerInputManager"/>.
+    ///     Live registry of all currently held keys, each wrapped in a <see cref="KeyClass"/>.
+    ///     Mirrors <c>TouchClasses</c> in <see cref="PlayerInputManager"/>.
     /// </summary>
-    private readonly Dictionary<Key, KeyClass> _HeldKeys = new();
-
-    /// <summary>
-    ///     Chord events buffered this tick: KeyClass wrappers for keys that were pressed
-    ///     in the current grouping window. Flushed into the hit queue when the window closes.
-    /// </summary>
-    private readonly List<KeyClass> _PendingChord = new();
+    public readonly Dictionary<Key, KeyClass> KeyClasses = new();
 
     // ─── Mouse ownership state ───────────────────────────────────────────────────
 
@@ -91,7 +74,7 @@ public class PCInputManager : MonoBehaviour
     private Action<InputEventPtr, InputDevice> _OnInputEvent;
 
     // ─────────────────────────────────────────────────────────────────────────────
-    // Unity lifecycle — minimal; no Update()
+    // Unity lifecycle
     // ─────────────────────────────────────────────────────────────────────────────
 
     private void Awake()
@@ -108,7 +91,7 @@ public class PCInputManager : MonoBehaviour
     }
 
     // ─────────────────────────────────────────────────────────────────────────────
-    // Raw input — enumerate only changed controls to avoid per-event allocation
+    // Raw input — enumerate only changed controls, no per-event allocation
     // ─────────────────────────────────────────────────────────────────────────────
 
     private void HandleRawInputEvent(InputEventPtr eventPtr, InputDevice device)
@@ -125,69 +108,35 @@ public class PCInputManager : MonoBehaviour
 
             if (keyControl.wasPressedThisFrame)
             {
-                var keyClass = new KeyClass { KeyCode = key, PressTime = Player.CurrentTime };
-                _HeldKeys[key] = keyClass;
-                BufferKeyDown(keyClass);
+                var keyClass = new KeyClass
+                {
+                    KeyCode   = key,
+                    PressTime = Player.CurrentTime,
+                    Initial   = true,
+                };
+                KeyClasses[key] = keyClass;
             }
             else if (keyControl.wasReleasedThisFrame)
             {
-                _HeldKeys.Remove(key);
+                KeyClasses.Remove(key);
             }
         }
     }
 
-    /// <summary>Called by upstream layers (system, UI) to prevent a key reaching the chord pool.</summary>
+    /// <summary>Called by upstream layers (system, UI) to block a key from reaching input.</summary>
     public void ConsumeKey(Key key) => _ConsumedKeys.Add(key);
-
-    private void BufferKeyDown(KeyClass keyClass)
-    {
-        if (!_ChordWindowOpen)
-        {
-            _ChordWindowStart = Player.CurrentTime;
-            _ChordWindowOpen  = true;
-            _ChordBuffer.Clear();
-        }
-        _ChordBuffer.Add(keyClass.KeyCode);
-    }
 
     // ─────────────────────────────────────────────────────────────────────────────
     // Main tick — called by PlayerInputManager.UpdateInput() when DesktopInput = true
     // ─────────────────────────────────────────────────────────────────────────────
 
-    /// <summary>
-    ///     Main input tick. Called directly by <see cref="PlayerInputManager.UpdateInput"/>
-    ///     in place of the touch pipeline when <see cref="PlayerInputManager.DesktopInput"/>
-    ///     is true. Mirrors the structure of that method.
-    /// </summary>
     public void UpdateInput()
     {
         _ConsumedKeys.Clear();
 
-        // Flush chord window if it has expired this tick.
-        _PendingChord.Clear();
-        if (_ChordWindowOpen && Player.CurrentTime - _ChordWindowStart >= ChordGroupingWindowSec)
-        {
-            // Collect KeyClass wrappers for each key in the chord buffer.
-            // Keys that were released before the window closed are gone from _HeldKeys
-            // but we still want to count them — so we snapshot from _ChordBuffer.
-            foreach (Key key in _ChordBuffer)
-                if (_HeldKeys.TryGetValue(key, out KeyClass kc))
-                    _PendingChord.Add(kc);
-                else
-                    _PendingChord.Add(new KeyClass { KeyCode = key, PressTime = _ChordWindowStart });
-
-            _ChordBuffer.Clear();
-            _ChordWindowOpen = false;
-        }
-
         double judgementOffsetTime = Player.CurrentTime + Player.Settings.JudgmentOffset;
 
         // ── HitQueue processor ────────────────────────────────────────────────
-        // Mirrors PlayerInputManager's HitQueue loop. N chord keys hit N notes;
-        // held keys additionally clear catch notes as they arrive.
-
-        int chordBudget = _PendingChord.Count;
-        int chordIdx    = 0; // Tracks which KeyClass from _PendingChord consumed this slot.
 
         for (int a = 0; a < InputManager.HitQueue.Count; a++)
         {
@@ -199,7 +148,7 @@ public class PCInputManager : MonoBehaviour
                 continue;
             }
 
-            double delta = judgementOffsetTime - hitobject.Time; // ?? (I doubt this is delta)
+            double hitobjectTimingDelta = judgementOffsetTime - hitobject.Time;
 
             bool isDiscrete = hitobject.Current.Type == HitObject.HitType.Catch || hitobject.Current.Flickable;
             float window    = isDiscrete ? Player.PassWindow : Player.GoodWindow;
@@ -207,60 +156,54 @@ public class PCInputManager : MonoBehaviour
             if (hitobject.Current.HoldLength > 0 && !hitobject.PendingHoldQueue)
                 hitobject.PendingHoldQueue = true;
 
-            if (delta >= -window && !hitobject.IsProcessed)
+            var alreadyHit = false;
+
+            if (hitobjectTimingDelta >= -window && !hitobject.IsProcessed)
             {
-                bool consumed = false;
+                HitobjectProcessor(hitobject, hitobjectTimingDelta, ref alreadyHit);
 
-                if (!hitobject.Current.Flickable)
+                // Mark any key that intersects a discrete hitobject as in-range.
+                if (isDiscrete)
                 {
-                    // Chord keypress — each key in the chord independently claims one note.
-                    if (chordBudget > 0)
-                    {
-                        KeyClass assignedKey = chordIdx < _PendingChord.Count
-                            ? _PendingChord[chordIdx] : null;
-                        HitNote(hitobject, delta, assignedKey);
-                        chordBudget--;
-                        chordIdx++;
-                        consumed = true;
-                    }
-                    // Held key clears catch notes (resting finger equivalent), gated by
-                    // per-key cooldown unless the cursor intersects the note's hitbox.
-                    else if (_HeldKeys.Count > 0 && hitobject.Current.Type == HitObject.HitType.Catch)
-                    {
-                        KeyClass bestKey = FindBestHeldKeyForCatch(hitobject);
-                        if (bestKey != null)
+                    foreach (KeyClass key in KeyClasses.Values)
+                        if (Vector2.Distance(CursorPos(), hitobject.HitCoord.Position)
+                            <= hitobject.HitCoord.Radius)
                         {
-                            HitNote(hitobject, delta, bestKey);
-                            consumed = true;
+                            key.DiscreteHitobjectIsInRange = true;
+                            key.NearestDiscreteHitobject   = hitobject;
                         }
-                    }
                 }
 
-                // Pass non-flickable catch notes to DiscreteHitQueue for timed auto-clear,
-                // consistent with how the touch pipeline handles them.
-                if (!consumed && isDiscrete && !hitobject.Current.Flickable && !hitobject.InDiscreteHitQueue)
+                // Pass to DiscreteHitQueue
+                if (hitobject.InDiscreteHitQueue ||
+                    (alreadyHit && hitobject.Current.Type == HitObject.HitType.Catch))
                 {
-                    hitobject.InDiscreteHitQueue = true;
                     InputManager.DiscreteHitQueue.Add(hitobject);
-                    InputManager.HitQueue.RemoveAt(a--);
-                    continue;
+                    hitobject.InDiscreteHitQueue = false;
+                    InputManager.HitQueue.Remove(hitobject);
+                    a--;
                 }
 
-                // Normal tap notes
-                if (!consumed && delta > window)
+                if (!alreadyHit && hitobjectTimingDelta > window)
                 {
                     Player.Hit(hitobject, float.PositiveInfinity, false);
                     hitobject.IsProcessed = true;
+
+                    foreach (KeyClass key in KeyClasses.Values)
+                        if (key.QueuedHit == hitobject)
+                        {
+                            key.QueuedHit                  = null;
+                            key.DiscreteHitobjectIsInRange = false;
+                        }
+
                     EnqueueHoldNote(hitobject, missed: true);
                 }
             }
 
-            if (delta < -Math.Max(Player.PassWindow, Player.GoodWindow)) break;
+            if (hitobjectTimingDelta < -Math.Max(Player.PassWindow, Player.GoodWindow)) break;
         }
 
         // ── Hold queue processor ──────────────────────────────────────────────
-        // Verbatim mirror of PlayerInputManager's hold processor.
-        // IsPlayerHolding is true when any key is currently held (_HeldKeys.Count > 0).
 
         if (InputManager.HoldQueue.Count > 0)
         {
@@ -278,41 +221,64 @@ public class PCInputManager : MonoBehaviour
         }
 
         // ── Discrete queue processor ──────────────────────────────────────────
-        // Catch notes auto-clear at their exact time, or when a key is held.
+        // Catch notes: cleared at their time unconditionally (like the touch pipeline).
+        // Additionally gated by per-key cooldown + hitbox intersection for held keys.
 
         for (int i = 0; i < InputManager.DiscreteHitQueue.Count; i++)
         {
-            HitPlayer hit = InputManager.DiscreteHitQueue[i];
+            HitPlayer hitObject = InputManager.DiscreteHitQueue[i];
 
-            if (hit.Current.Flickable)
+            double time = judgementOffsetTime - hitObject.Time;
+
+            if (hitObject.Current.Flickable)
             {
-                hit.InDiscreteHitQueue = false;
-                InputManager.DiscreteHitQueue.RemoveAt(i--);
+                hitObject.InDiscreteHitQueue = false;
+                InputManager.DiscreteHitQueue.Remove(hitObject);
                 continue;
             }
 
-            if (hit.Current.Type == HitObject.HitType.Catch)
+            if (judgementOffsetTime >= hitObject.Time && hitObject.Current.Type == HitObject.HitType.Catch)
             {
-                double delta = judgementOffsetTime - hit.Time;
+                if (!hitObject.IsProcessed)
+                    Player.Hit(hitObject, time);
 
-                bool inWindow  = judgementOffsetTime >= hit.Time;
-                KeyClass heldKeyForCatch = null;
-                if (_HeldKeys.Count > 0 && Math.Abs(delta) <= Player.PassWindow)
-                    heldKeyForCatch = FindBestHeldKeyForCatch(hit);
-                bool heldClear = heldKeyForCatch != null;
+                hitObject.InDiscreteHitQueue = false;
+                hitObject.IsProcessed        = true;
 
-                if ((inWindow || heldClear) && !hit.IsProcessed)
-                {
-                    Player.Hit(hit, delta);
-                    hit.InDiscreteHitQueue = false;
-                    hit.IsProcessed        = true;
-                    if (heldClear) heldKeyForCatch.RecordCatchCooldown(Player.CurrentTime, GetCurrentBPM());
-                    EnqueueHoldNote(hit);
+                foreach (KeyClass key in KeyClasses.Values)
+                    if (key.QueuedHit == hitObject)
+                    {
+                        key.QueuedHit                  = null;
+                        key.DiscreteHitobjectIsInRange = false;
+                    }
 
-                    if (!hit) continue;
-                    InputManager.DiscreteHitQueue.RemoveAt(i--);
-                }
+                EnqueueHoldNote(hitObject: hitObject);
+
+                if (!hitObject) continue;
+                InputManager.DiscreteHitQueue.Remove(hitObject);
             }
+        }
+
+        // ── Queued-hit resolver ───────────────────────────────────────────────
+        // Fires QueuedHit for every Initial key — mirrors TouchClass queued-hit resolver.
+
+        foreach (KeyClass key in KeyClasses.Values)
+        {
+            if (key.QueuedHit &&
+                !key.QueuedHit.IsProcessed &&
+                key.QueuedHit.Current.Type == HitObject.HitType.Normal &&
+                !key.QueuedHit.Current.Flickable)
+            {
+                Player.Hit(
+                    key.QueuedHit,
+                    key.PressTime + Player.Settings.JudgmentOffset - key.QueuedHit.Time
+                );
+                key.QueuedHit.IsProcessed = true;
+                EnqueueHoldNote(key.QueuedHit);
+                key.QueuedHit = null;
+            }
+
+            key.Initial = false; // Initial only lasts one tick.
         }
 
         // ── Cue tick ──────────────────────────────────────────────────────────
@@ -320,7 +286,83 @@ public class PCInputManager : MonoBehaviour
     }
 
     // ─────────────────────────────────────────────────────────────────────────────
-    // Hold queue processor — mirrors PlayerInputManager.HoldQueue_Processor verbatim
+    // HitobjectProcessor — mirrors PlayerInputManager.HitobjectProcessor
+    // ─────────────────────────────────────────────────────────────────────────────
+
+    private void HitobjectProcessor(HitPlayer hitobject, double hitobjectTimingDelta, ref bool alreadyHit)
+    {
+        // Flick notes — mouse handles these; keyboard is not involved.
+        if (hitobject.Current.Flickable)
+            return;
+
+        switch (hitobject.Current.Type)
+        {
+            case HitObject.HitType.Normal:
+                // Each Initial key scans for the nearest note by hitbox proximity —
+                // exactly like each new touch finger does.
+                foreach (KeyClass key in KeyClasses.Values)
+                {
+                    if (!key.Initial) continue;
+
+                    float distance = Vector2.Distance(CursorPos(), hitobject.HitCoord.Position);
+
+                    var discreteTapProtectionPassed = false;
+
+                    if (distance < hitobject.HitCoord.Radius &&
+                        (discreteTapProtectionPassed =
+                            !(key.DiscreteHitobjectIsInRange &&
+                              key.NearestDiscreteHitobject != null &&
+                              key.NearestDiscreteHitobject.Current.Type == HitObject.HitType.Catch &&
+                              key.NearestDiscreteHitobject.Time < hitobject.Time &&
+                              hitobject.Time >= -Player.GoodWindow &&
+                              Vector2.Distance(CursorPos(), key.NearestDiscreteHitobject.HitCoord.Position) < distance &&
+                              hitobject.Time - key.NearestDiscreteHitobject.Time <= Player.GoodWindow * 2
+                            ) ||
+                            (key.DiscreteHitobjectIsInRange &&
+                             key.NearestDiscreteHitobject != null &&
+                             (Math.Abs(hitobjectTimingDelta) <= Player.PerfectWindow ||
+                              Mathf.Approximately(hitobject.Time, key.NearestDiscreteHitobject.Time) ||
+                              Mathf.Approximately(
+                                  Vector3.Distance(hitobject.HitCoord.Position,
+                                                   key.NearestDiscreteHitobject.HitCoord.Position),
+                                  hitobject.HitCoord.Radius / 2)
+                             ))
+                        ) &&
+                        (!key.QueuedHit ||
+                         hitobject.Time < key.QueuedHit.Time ||
+                         (Mathf.Approximately(hitobject.Time, key.QueuedHit.Time) &&
+                          distance < key.QueuedHitDistance))
+                       )
+                    {
+                        key.QueuedHit         = hitobject;
+                        key.QueuedHitDistance = distance;
+                        alreadyHit            = true;
+                    }
+                }
+                return;
+
+            case HitObject.HitType.Catch:
+                // Catch: any held key within the cooldown gate can claim it.
+                // No Initial check — resting keys clear catch notes too.
+                foreach (KeyClass key in KeyClasses.Values)
+                {
+                    if (hitobject.InDiscreteHitQueue) break; // Already queued.
+
+                    // Gate: per-key cooldown + cursor proximity.
+                    if (!CanKeyClearCatch(key, hitobject)) continue;
+
+                    hitobject.InDiscreteHitQueue          = true;
+                    key.DiscreteHitobjectDistance         = Vector2.Distance(CursorPos(), hitobject.HitCoord.Position);
+                    key.DiscreteHitobjectIsInRange        = true;
+                    key.CatchCooldownExpiry               = Player.CurrentTime + 60f / GetCurrentBPM() / 16f;
+                    alreadyHit                            = true;
+                }
+                return;
+        }
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────────
+    // HoldQueue_Processor — verbatim mirror of PlayerInputManager's
     // ─────────────────────────────────────────────────────────────────────────────
 
     private void HoldQueue_Processor(HoldNoteClass holdNoteEntry, ref int queuePtr, float beat, double judgementOffsetTime)
@@ -366,11 +408,14 @@ public class PCInputManager : MonoBehaviour
             )
         };
 
-        // IsPlayerHolding: any key held down counts, not a specific touch.
-        holdNoteEntry.IsPlayerHolding = _HeldKeys.Count > 0;
+        // Hold: any key within the hitbox counts, mirroring touch AssignedTouch check.
+        holdNoteEntry.IsPlayerHolding = KeyClasses.Count > 0 &&
+            Vector2.Distance(CursorPos(), holdNoteEntry.HitObject.HitCoord.Position)
+            <= holdNoteEntry.HitObject.HitCoord.Radius;
 
         holdNoteEntry.holdPassDrainValue = Mathf.Clamp01(
-            holdNoteEntry.holdPassDrainValue + Time.deltaTime / Player.PassWindow * (holdNoteEntry.IsPlayerHolding ? 1f : -1f)
+            holdNoteEntry.holdPassDrainValue + Time.deltaTime / Player.PassWindow
+            * (holdNoteEntry.IsPlayerHolding ? 1f : -1f)
         );
 
         if (!holdNoteEntry.IsScoring && holdNoteEntry.holdPassDrainValue >= 1)
@@ -417,37 +462,17 @@ public class PCInputManager : MonoBehaviour
     // Helpers
     // ─────────────────────────────────────────────────────────────────────────────
 
-    /// <param name="key">
-    ///     The <see cref="KeyClass"/> responsible for this hit. When the note is a catch
-    ///     cleared by a held key (not a fresh chord press), a cooldown is recorded on it.
-    ///     May be null for autoplay or missed-note forced hits.
-    /// </param>
-    private void HitNote(HitPlayer note, double delta, KeyClass key = null)
-    {
-        Player.Hit(note, delta);
-        note.IsProcessed = true;
-        // Record catch cooldown only for held-key clears (key already held, not a new press).
-        // Chord presses don't need the cooldown — they're distinct inputs by definition.
-        if (key != null && note.Current.Type == HitObject.HitType.Catch
-                        && key.PressTime < _ChordWindowStart)
-            key.RecordCatchCooldown(Player.CurrentTime, GetCurrentBPM());
-        
-        if (note.Current.Length > 0)
-            EnqueueHoldNote(note);
-    }
-
     private void EnqueueHoldNote(HitPlayer hitObject, bool missed = false)
     {
         if (!hitObject.PendingHoldQueue) return;
-        
+
         InputManager.HoldQueue.Add(new HoldNoteClass
         {
             HitObject          = hitObject,
             holdPassDrainValue = missed ? 0 : 1,
-            IsPlayerHolding    = _HeldKeys.Count > 0,
+            IsPlayerHolding    = KeyClasses.Count > 0,
         });
 
-        // Register with mouse ownership queue if it needs the cursor.
         if (hitObject.Current.HoldLength > 0 || hitObject.Current.Flickable)
         {
             LaneStep laneStep = hitObject.Lane?.Current?.LaneSteps?.Count > 0
@@ -456,54 +481,34 @@ public class PCInputManager : MonoBehaviour
         }
     }
 
-    // ─────────────────────────────────────────────────────────────────────────────
-    // Mouse ownership queue
-    // ─────────────────────────────────────────────────────────────────────────────
-
-    // ─────────────────────────────────────────────────────────────────────────────
-    // Catch throttle helpers
-    // ─────────────────────────────────────────────────────────────────────────────
+    /// <summary>
+    ///     Returns the current cursor screen position. All hitbox checks use this
+    ///     so the cursor is the single spatial reference point, equivalent to a
+    ///     touch's <c>screenPosition</c>.
+    /// </summary>
+    private Vector2 CursorPos() =>
+        Mouse.current != null ? Mouse.current.position.ReadValue() : Vector2.zero;
 
     /// <summary>
-    ///     Finds the best currently-held key to clear <paramref name="note"/> as a passive
-    ///     hold-clear, or null if no key passes the cooldown/intersection gate.
-    ///
-    ///     Each held key is checked independently — a key on cooldown is only allowed if
-    ///     the cursor intersects the note's hitbox (notes close enough to share one input).
-    ///     Among eligible keys, prefer the one whose cooldown expired earliest (most "rested").
+    ///     Per-key cooldown gate for catch notes.
+    ///     A key on cooldown is only permitted to clear a catch note if the cursor
+    ///     intersects the note's hitbox — meaning the notes are spatially close enough
+    ///     that a single input covers them naturally.
     /// </summary>
-    private KeyClass FindBestHeldKeyForCatch(HitPlayer note)
+    private bool CanKeyClearCatch(KeyClass key, HitPlayer note)
     {
-        Vector2 cursorPos = Mouse.current != null
-            ? Mouse.current.position.ReadValue()
-            : note.HitCoord.Position;
-
-        bool cursorIntersects = Vector2.Distance(cursorPos, note.HitCoord.Position)
+        bool cooldownExpired  = Player.CurrentTime >= key.CatchCooldownExpiry;
+        bool cursorIntersects = Vector2.Distance(CursorPos(), note.HitCoord.Position)
                                 <= note.HitCoord.Radius;
-
-        KeyClass best = null;
-        double   bestExpiry = double.MaxValue;
-
-        foreach (KeyClass kc in _HeldKeys.Values)
-        {
-            // Gate: cooldown expired, or cursor intersects hitbox.
-            if (!kc.IsCatchCooldownExpired(Player.CurrentTime) && !cursorIntersects)
-                continue;
-
-            // Prefer whichever key has the earliest (most rested) expiry.
-            double expiry = kc.CatchCooldownExpiry;
-            if (best == null || expiry < bestExpiry)
-            {
-                best       = kc;
-                bestExpiry = expiry;
-            }
-        }
-
-        return best;
+        return cooldownExpired || cursorIntersects;
     }
 
     private float GetCurrentBPM() =>
         PlayerScreen.sTargetSong?.Timing.GetStop((float)Player.CurrentTime, out int _).BPM ?? 120f;
+
+    // ─────────────────────────────────────────────────────────────────────────────
+    // Mouse ownership queue
+    // ─────────────────────────────────────────────────────────────────────────────
 
     private void EnqueueMouseCandidate(HitPlayer note, LaneStep laneStep)
     {
@@ -548,7 +553,6 @@ public class PCInputManager : MonoBehaviour
         if (wasOwner)
         {
             _LastHoldReleaseTime = Player.CurrentTime;
-
             if (_OwnershipQueue.Count > 0)
                 GrantOwnership(_OwnershipQueue[0]);
             else
@@ -558,12 +562,8 @@ public class PCInputManager : MonoBehaviour
 
     private void GrantOwnership(PCOwnershipEntry entry)
     {
-        if (Mouse.current != null)
-            Mouse.current.WarpCursorPosition(entry.Note.HitCoord.Position);
-
-        float laneRot = GetLaneScreenRotation(entry.Note);
-        float duration = GetApproachDuration(entry.Note);
-        PCMouseOwnershipCueManager.sMain?.OnOwnerChanged(entry.Note, laneRot, duration);
+        Mouse.current?.WarpCursorPosition(entry.Note.HitCoord.Position);
+        PCMouseOwnershipCueManager.sMain?.OnOwnerChanged(entry.Note, GetLaneScreenRotation(entry.Note), GetApproachDuration(entry.Note));
     }
 
     // ─────────────────────────────────────────────────────────────────────────────
@@ -596,7 +596,7 @@ public class PCInputManager : MonoBehaviour
         int fc = CompareFlickSpecificity(a, b);
         if (fc != 0) return fc;
 
-        Vector2 cursor = Mouse.current?.position.ReadValue() ?? Vector2.zero;
+        Vector2 cursor = CursorPos();
         float   distA  = Vector2.Distance(cursor, a.Note?.HitCoord.Position ?? Vector2.zero);
         float   distB  = Vector2.Distance(cursor, b.Note?.HitCoord.Position ?? Vector2.zero);
         int     dc     = distB.CompareTo(distA);
@@ -645,7 +645,6 @@ public class PCInputManager : MonoBehaviour
         if (note?.Lane?.Current == null || Player?.Pseudocamera == null) return 0f;
         var steps = note.Lane.Current.LaneSteps;
         if (steps == null || steps.Count == 0) return 0f;
-        // Use the note's world-space transform for direction — StartPointPosition is local.
         Vector2 s = Player.Pseudocamera.WorldToScreenPoint(note.transform.position);
         Vector2 e = Player.Pseudocamera.WorldToScreenPoint(note.transform.position + note.transform.right);
         Vector2 d = e - s;
@@ -669,39 +668,43 @@ public class PCOwnershipEntry
 }
 
 /// <summary>
-///     Stateful wrapper for a single held keyboard key, mirroring the <c>TouchClass</c>
-///     pattern in <see cref="PlayerInputManager"/>. Persists in <c>_HeldKeys</c> from
-///     keydown to keyup, carrying per-key catch cooldown state.
+///     Stateful wrapper for a single held keyboard key, mirroring <c>TouchClass</c>
+///     in <see cref="PlayerInputManager"/>. Persists in <c>KeyClasses</c> from keydown
+///     to keyup, carrying per-key QueuedHit and catch cooldown state.
 /// </summary>
 public class KeyClass
 {
     /// <summary>The physical key this wrapper represents.</summary>
     public Key KeyCode;
 
-    /// <summary>
-    /// A bool that only lasts one update loop. Used for taps
-    /// </summary>
+    /// <summary>True only on the first tick after keydown — used to identify new presses.</summary>
     public bool Initial;
 
     /// <summary>Game time (seconds) when this key was pressed.</summary>
     public double PressTime;
 
     /// <summary>
-    ///     Game time (seconds) at which the catch cooldown for this key expires.
-    ///     <see cref="double.NegativeInfinity"/> means no cooldown is active.
+    ///     The note this key has claimed to hit, resolved at end of frame.
+    ///     Mirrors <c>TouchClass.QueuedHit</c>.
     /// </summary>
-    public double CatchCooldownExpiry = double.NegativeInfinity;
+    public HitPlayer QueuedHit;
 
-    /// <summary>Returns true if the catch cooldown has expired at <paramref name="currentTime"/>.</summary>
-    public bool IsCatchCooldownExpired(double currentTime) => currentTime >= CatchCooldownExpiry;
+    /// <summary>Distance from cursor to the queued hit at claim time. Used for nearest-note selection.</summary>
+    public float QueuedHitDistance;
+
+    /// <summary>Whether the cursor is currently within a discrete hitobject's radius.</summary>
+    public bool DiscreteHitobjectIsInRange;
+
+    /// <summary>Distance to the nearest discrete hitobject. Used for tap protection.</summary>
+    public float DiscreteHitobjectDistance;
+
+    /// <summary>The nearest discrete hitobject to this key's cursor. Used for tap protection.</summary>
+    public HitPlayer NearestDiscreteHitobject;
 
     /// <summary>
-    ///     Stamps a catch cooldown on this key.
-    ///     Timeout = 60 / BPM / 16 seconds (one 1/16th note at current tempo).
+    ///     Game time (seconds) at which this key's catch cooldown expires.
+    ///     <c>double.NegativeInfinity</c> = no cooldown active.
+    ///     Timeout = 60 / BPM / 16 (one 1/16th note).
     /// </summary>
-    public void RecordCatchCooldown(double currentTime, float bpm)
-    {
-        float timeout        = 60f / bpm / 16f;
-        CatchCooldownExpiry  = currentTime + timeout;
-    }
+    public double CatchCooldownExpiry = double.NegativeInfinity;
 }
