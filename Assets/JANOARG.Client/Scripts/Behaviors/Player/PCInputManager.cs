@@ -5,6 +5,7 @@ using JANOARG.Client.Behaviors.Player;
 using JANOARG.Shared.Data.ChartInfo;
 using UnityEngine;
 using UnityEngine.InputSystem;
+using UnityEngine.InputSystem.Controls;
 using UnityEngine.InputSystem.LowLevel;
 
 /// <summary>
@@ -425,7 +426,7 @@ public class PCInputManager : MonoBehaviour
         if (_OwnershipQueue.Count > 0) return true; // Occupied.
 
         float bpm    = PlayerScreen.sTargetSong != null
-            ? PlayerScreen.sTargetSong.Timing.GetBPM((float)Player.CurrentTime)
+            ? PlayerScreen.sTargetSong.Timing.GetStop((float)Player.CurrentTime, out int _).BPM
             : 120f;
         float window = bpm / 4f / 1000f;
 
