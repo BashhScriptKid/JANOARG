@@ -64,7 +64,7 @@ That's the chord, emergent, same mechanism as two fingers on a touchscreen.
 | Note type | Input source | Cursor used? |
 |---|---|---|
 | Normal tap | Any `Initial` key — first eligible note in window | No |
-| Catch (held) | Any held key passing cooldown gate | Only for cooldown bypass (hitbox intersection) |
+| Catch (held) | Any held key passing cooldown gate | Only for per-key cooldown bypass — if cursor is already over the note (e.g. ownership queue placed it there), the throttle is waived. Not player-directed. |
 | Flickable Normal (tap-flick) | `Initial` key + mouse gesture | Yes — `PressPosition` for corridor/radius check |
 | Flickable Catch (catch-flick) | Mouse gesture only | Yes — `FlickCenter` and current position |
 | Hold sustain | Any held key | Yes — cursor must be within hold tail hitbox |
