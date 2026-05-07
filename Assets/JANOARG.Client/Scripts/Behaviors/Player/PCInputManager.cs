@@ -8,99 +8,59 @@ using UnityEngine.InputSystem.Controls;
 using UnityEngine.InputSystem.LowLevel;
 
 /// <summary>
-///     Keyboard + mouse hybrid input manager for JANOARG on PC.
+///     PC keyboard input manager.
 ///
-///     <para>Called by <see cref="PlayerInputManager.UpdateInput"/> when
-///     <see cref="PlayerInputManager.DesktopInput"/> is true — direct replacement tick,
-///     no <c>MonoBehaviour.Update</c>.</para>
-///
-///     <para><b>Architecture mirrors <see cref="PlayerInputManager"/> low-level flow:</b>
-///     <list type="bullet">
-///       <item>Each held key is a <see cref="KeyClass"/> (analogous to <c>TouchClass</c>),
-///             persisting from keydown to keyup with its own state.</item>
-///       <item>On keydown, <c>Initial = true</c> for one tick — the key scans the HitQueue
-///             for the nearest note within hitbox and stores it as <c>QueuedHit</c>, exactly
-///             like a new touch finger does. No chord budget; N simultaneous keypresses each
-///             independently claim their note by proximity, which is how chords emerge.</item>
-///       <item>Queued-hit resolver fires all <c>Initial</c> keys' <c>QueuedHit</c>s at the
-///             end of the frame, matching the touch pipeline's resolver.</item>
-///       <item>Held keys (not Initial) handle catch auto-clear via hitbox intersection +
-///             per-key cooldown.</item>
-///     </list></para>
+///     Rewrite roadmap note: this file is being rebuilt playtest-first. Iteration 1
+///     implements single tap notes. Iteration 2 adds single catch notes. Holds are
+///     currently under test. Chords, flicks, and ownership cues are deferred until
+///     their playtest gate.
 /// </summary>
 public class PCInputManager : MonoBehaviour
 {
     public static PCInputManager sInstance;
 
-    // ─── Inspector ───────────────────────────────────────────────────────────────
-
     [Header("References")]
-    public PlayerScreen       Player;
+    public PlayerScreen Player;
     public PlayerInputManager InputManager;
 
-    // ─── Keyboard state ──────────────────────────────────────────────────────────
-
-    private readonly HashSet<Key>              _ConsumedKeys = new();
-
-    /// <summary>
-    ///     Live registry of all currently held keys, each wrapped in a <see cref="KeyClass"/>.
-    ///     Mirrors <c>TouchClasses</c> in <see cref="PlayerInputManager"/>.
-    /// </summary>
-    public readonly Dictionary<Key, KeyClass> KeyClasses = new();
-
-    // ─── Mouse state ─────────────────────────────────────────────────────────────
-
-    /// <summary>
-    ///     Single persistent mouse state — analogous to one <c>TouchClass</c> since
-    ///     there is only one cursor. Carries flick gesture state and velocity tracker.
-    /// </summary>
-    public readonly MouseClass Mouse_ = new();
-
-    // ─── Mouse ownership state ───────────────────────────────────────────────────
-
-    private readonly List<PCOwnershipEntry> _OwnershipQueue      = new();
-    private double                          _LastHoldReleaseTime = double.NegativeInfinity;
-
-    // ─── Easing rank table ───────────────────────────────────────────────────────
-
-    private static readonly EaseFunction[] sr_EasingRank =
-    {
-        EaseFunction.Elastic,
-        EaseFunction.Exponential,
-        EaseFunction.Circle,
-        EaseFunction.Back,
-        EaseFunction.Quintic,
-        EaseFunction.Quartic,
-        EaseFunction.Cubic,
-        EaseFunction.Quadratic,
-        EaseFunction.Sine,
-        EaseFunction.Linear,
-    };
-
-    // ─── Raw input wiring ────────────────────────────────────────────────────────
+    private readonly Dictionary<Key, PCKeyState> _Keys = new();
+    private readonly HashSet<Key> _ConsumedKeys = new();
+    private readonly HashSet<HitPlayer> _SnappedHoldHeads = new();
+    private readonly List<Key> _KeysToRemove = new();
 
     private Action<InputEventPtr, InputDevice> _OnInputEvent;
 
-    // ─────────────────────────────────────────────────────────────────────────────
-    // Unity lifecycle
-    // ─────────────────────────────────────────────────────────────────────────────
-
     private void Awake()
     {
-        sInstance     = this;
+        sInstance = this;
         _OnInputEvent = HandleRawInputEvent;
         InputSystem.onEvent += _OnInputEvent;
     }
 
     private void OnDestroy()
     {
-        if (_OnInputEvent != null) InputSystem.onEvent -= _OnInputEvent;
-        sInstance = null;
+        if (_OnInputEvent != null)
+            InputSystem.onEvent -= _OnInputEvent;
+
+        if (sInstance == this)
+            sInstance = null;
     }
 
-    // ─────────────────────────────────────────────────────────────────────────────
-    // Raw input — enumerate only changed controls, no per-event allocation
-    // ─────────────────────────────────────────────────────────────────────────────
+    /// <summary>Called by upstream layers to block a key from reaching gameplay input.</summary>
+    public void ConsumeKey(Key key) => _ConsumedKeys.Add(key);
+
+    public void UpdateInput()
+    {
+        double judgementOffsetTime = Player.CurrentTime + Player.Settings.JudgmentOffset;
+
+        ProcessHitQueue(judgementOffsetTime);
+        ProcessDiscreteHitQueue(judgementOffsetTime);
+        ResolveQueuedTapHits();
+        ProcessHoldQueue(judgementOffsetTime);
+        EndFrameKeyLifecycle();
+
+        _ConsumedKeys.Clear();
+    }
 
     private void HandleRawInputEvent(InputEventPtr eventPtr, InputDevice device)
     {
@@ -113,870 +73,338 @@ public class PCInputManager : MonoBehaviour
 
             Key key = keyControl.keyCode;
             if (_ConsumedKeys.Contains(key)) continue;
+            if (!keyControl.ReadValueFromEvent(eventPtr, out float value)) continue;
 
-            if (keyControl.wasPressedThisFrame)
+            bool pressed = value > 0.5f;
+            if (pressed)
+                PressKey(key);
+            else
+                ReleaseKey(key);
+        }
+    }
+
+    private void PressKey(Key key)
+    {
+        if (_Keys.ContainsKey(key)) return;
+
+        _Keys[key] = new PCKeyState
+        {
+            KeyCode = key,
+            Initial = true,
+            PressTime = Player.CurrentTime,
+        };
+    }
+
+    private void ReleaseKey(Key key)
+    {
+        if (_Keys.TryGetValue(key, out PCKeyState keyState))
+            keyState.Released = true;
+    }
+
+    private void ProcessHitQueue(double judgementOffsetTime)
+    {
+        for (int i = 0; i < InputManager.HitQueue.Count; i++)
+        {
+            HitPlayer hitObject = InputManager.HitQueue[i];
+
+            if (!hitObject)
             {
-                var keyClass = new KeyClass
-                {
-                    KeyCode       = key,
-                    PressTime     = Player.CurrentTime,
-                    PressPosition = CursorPos(),
-                    Initial       = true,
-                };
-                KeyClasses[key] = keyClass;
+                InputManager.HitQueue.RemoveAt(i--);
+                continue;
             }
-            else if (keyControl.wasReleasedThisFrame)
+
+            double timingDelta = judgementOffsetTime - hitObject.Time;
+            if (timingDelta < -Math.Max(Player.PassWindow, Player.GoodWindow))
+                break;
+
+            if (hitObject.IsProcessed)
+                continue;
+
+            if (hitObject.Current.HoldLength > 0 && !hitObject.PendingHoldQueue)
+                hitObject.PendingHoldQueue = true;
+
+            bool isTap = IsTapHead(hitObject);
+            bool isCatch = IsCatchHead(hitObject);
+
+            if (!isTap && !isCatch)
+                continue;
+
+            float window = isCatch ? Player.PassWindow : Player.GoodWindow;
+            if (timingDelta < -window)
+                continue;
+
+            bool alreadyHit = isCatch ? TryQueueCatchHit(hitObject) : TryQueueTapHit(hitObject);
+            if (isCatch && hitObject.InDiscreteHitQueue)
             {
-                KeyClasses.Remove(key);
+                InputManager.DiscreteHitQueue.Add(hitObject);
+                hitObject.InDiscreteHitQueue = false;
+                InputManager.HitQueue.RemoveAt(i--);
+                continue;
+            }
+
+            if (!alreadyHit && timingDelta > window)
+            {
+                Player.Hit(hitObject, float.PositiveInfinity, false);
+                hitObject.IsProcessed = true;
+                ClearQueuedHit(hitObject);
+                EnqueueHoldNote(hitObject, missed: true);
             }
         }
     }
 
-    /// <summary>Called by upstream layers (system, UI) to block a key from reaching input.</summary>
-    public void ConsumeKey(Key key) => _ConsumedKeys.Add(key);
-
-    // ─────────────────────────────────────────────────────────────────────────────
-    // Main tick — called by PlayerInputManager.UpdateInput() when DesktopInput = true
-    // ─────────────────────────────────────────────────────────────────────────────
-
-    public void UpdateInput()
+    private bool TryQueueTapHit(HitPlayer hitObject)
     {
-        _ConsumedKeys.Clear();
+        bool alreadyHit = false;
 
-        // ── Mouse flick tracking ──────────────────────────────────────────────
-        // Mirrors the per-frame push in the touch pipeline's active-touch loop.
-        // DPI note: matches PlayerInputManager (raw Screen.dpi). Windowed-mode
-        // scaling is a known gap to address in both engines together later.
-
-        float screenDpi      = Screen.dpi > 0 ? Screen.dpi : 100f;
-        float flickThreshold = screenDpi * 0.2f;
-        Vector2 cursorNow    = CursorPos();
-
-        if (UnityEngine.InputSystem.Mouse.current != null)
+        foreach (PCKeyState keyState in _Keys.Values)
         {
-            Mouse_.VelocityTracker.Push((float)Player.CurrentTime, cursorNow);
-            float velocityMagnitude = Mouse_.VelocityTracker.Speed().magnitude;
-            float velocityThreshold = 1.8f * (screenDpi / 275f) * screenDpi;
-            Mouse_.IsGesturing      = velocityMagnitude >= velocityThreshold;
-
-            if (!Mouse_.Flicked)
-            {
-                bool flickableApproaching = InputManager.HitQueue.Exists(hit =>
-                    hit.Current.Flickable && !hit.IsProcessed &&
-                    Math.Abs(hit.Time - Player.CurrentTime) <= Player.PassWindow * 2);
-
-                if (flickableApproaching)
-                {
-                    if (!Mouse_.FlickCenterResetPending)
-                    {
-                        Mouse_.FlickCenterResetPending = true;
-                        Mouse_.FlickCenterResetClock   = 0;
-                    }
-
-                    // Snap FlickCenter when cursor enters a flickable note's hitbox.
-                    HitPlayer enteredNote = InputManager.HitQueue.Find(hit =>
-                        hit.Current.Flickable && !hit.IsProcessed &&
-                        Vector2.Distance(cursorNow, hit.HitCoord.Position) <= hit.HitCoord.Radius);
-
-                    if (enteredNote != null && Mouse_.FlickCenterSnappedNote != enteredNote)
-                    {
-                        Mouse_.FlickCenter            = cursorNow;
-                        Mouse_.FlickCenterSnappedNote = enteredNote;
-                    }
-                }
-                else
-                {
-                    Mouse_.FlickCenterResetPending = false;
-                    Mouse_.FlickCenterResetClock  += Time.deltaTime;
-
-                    if (Mouse_.FlickCenterResetClock >= 0.08f)
-                    {
-                        Mouse_.FlickCenter           = cursorNow;
-                        Mouse_.FlickCenterResetClock = 0;
-                    }
-                }
-
-                // Track direction from threshold/2 onward for stable readings.
-                float flickDist = Vector2.Distance(cursorNow, Mouse_.FlickCenter);
-                if (flickDist >= flickThreshold / 2f)
-                    Mouse_.flickDirection = -Vector2.SignedAngle(Vector2.up, cursorNow - Mouse_.FlickCenter);
-
-                // Commit: velocity pre-gate + distance threshold.
-                if (Mouse_.IsGesturing &&
-                    (Mathf.Approximately(flickDist, flickThreshold) || flickDist > flickThreshold))
-                {
-                    Mouse_.Flicked   = true;
-                    Mouse_.FlickTime = Player.CurrentTime;
-                }
-            }
-
-            // Invalidator — mirrors touch pipeline.
-            if (Mouse_.Flicked)
-            {
-                bool flickTimedOut = Math.Abs(Player.CurrentTime - Mouse_.FlickTime) > Player.PerfectWindow;
-                bool nearAnyFlickable = InputManager.HitQueue.Exists(hit =>
-                    hit.Current.Flickable && !hit.IsProcessed &&
-                    Math.Abs(hit.Time - Player.CurrentTime) <= Player.PassWindow);
-
-                if (flickTimedOut && nearAnyFlickable)
-                {
-                    Mouse_.Flicked       = false;
-                    Mouse_.FlickCenter   = cursorNow;
-                }
-            }
-        }
-
-        double judgementOffsetTime = Player.CurrentTime + Player.Settings.JudgmentOffset;
-
-        // ── HitQueue processor ────────────────────────────────────────────────
-
-        for (int a = 0; a < InputManager.HitQueue.Count; a++)
-        {
-            HitPlayer hitobject = InputManager.HitQueue[a];
-
-            if (!hitobject)
-            {
-                InputManager.HitQueue.RemoveAt(a--);
+            if (!keyState.Initial || keyState.QueuedHit != null)
                 continue;
-            }
 
-            double hitobjectTimingDelta = judgementOffsetTime - hitobject.Time;
-
-            bool isDiscrete = hitobject.Current.Type == HitObject.HitType.Catch || hitobject.Current.Flickable;
-            float window    = isDiscrete ? Player.PassWindow : Player.GoodWindow;
-
-            if (hitobject.Current.HoldLength > 0 && !hitobject.PendingHoldQueue)
-                hitobject.PendingHoldQueue = true;
-
-            var alreadyHit = false;
-
-            if (hitobjectTimingDelta >= -window && !hitobject.IsProcessed)
-            {
-                HitobjectProcessor(hitobject, hitobjectTimingDelta, ref alreadyHit);
-
-                // Mark all keys as in-range of this discrete hitobject — no cursor gate,
-                // key presence alone is the input signal.
-                if (isDiscrete)
-                {
-                    foreach (KeyClass key in KeyClasses.Values)
-                    {
-                        key.DiscreteHitobjectIsInRange = true;
-                        key.NearestDiscreteHitobject   = hitobject;
-                    }
-                }
-
-                // Pass to DiscreteHitQueue
-                if (hitobject.InDiscreteHitQueue ||
-                    (alreadyHit && hitobject.Current.Type == HitObject.HitType.Catch))
-                {
-                    InputManager.DiscreteHitQueue.Add(hitobject);
-                    hitobject.InDiscreteHitQueue = false;
-                    InputManager.HitQueue.Remove(hitobject);
-                    a--;
-                }
-
-                if (!alreadyHit && hitobjectTimingDelta > window)
-                {
-                    Player.Hit(hitobject, float.PositiveInfinity, false);
-                    hitobject.IsProcessed = true;
-
-                    foreach (KeyClass key in KeyClasses.Values)
-                        if (key.QueuedHit == hitobject)
-                        {
-                            key.QueuedHit                  = null;
-                            key.DiscreteHitobjectIsInRange = false;
-                        }
-
-                    EnqueueHoldNote(hitobject, missed: true);
-                }
-            }
-
-            if (hitobjectTimingDelta < -Math.Max(Player.PassWindow, Player.GoodWindow)) break;
+            keyState.QueuedHit = hitObject;
+            alreadyHit = true;
+            break;
         }
 
-        // ── Hold queue processor ──────────────────────────────────────────────
+        return alreadyHit;
+    }
 
-        if (InputManager.HoldQueue.Count > 0)
-        {
-            float beat = PlayerScreen.sTargetSong.Timing.ToBeat((float)judgementOffsetTime);
+    private bool TryQueueCatchHit(HitPlayer hitObject)
+    {
+        if (!HasHeldKey())
+            return false;
 
-            var currentCamera =
-                (CameraController)PlayerScreen.sTargetChart.Data.Camera.GetStoryboardableObject(beat);
+        hitObject.InDiscreteHitQueue = true;
+        return true;
+    }
 
-            Player.Pseudocamera.transform.position    = currentCamera.CameraPivot;
-            Player.Pseudocamera.transform.eulerAngles = currentCamera.CameraRotation;
-            Player.Pseudocamera.transform.Translate(Vector3.back * currentCamera.PivotDistance);
-
-            for (int a = 0; a < InputManager.HoldQueue.Count; a++)
-                HoldQueue_Processor(InputManager.HoldQueue[a], ref a, beat, judgementOffsetTime);
-        }
-
-        // ── Discrete queue processor ──────────────────────────────────────────
-        // Catch notes: cleared at their time unconditionally (like the touch pipeline).
-        // Additionally gated by per-key cooldown + hitbox intersection for held keys.
-
+    private void ProcessDiscreteHitQueue(double judgementOffsetTime)
+    {
         for (int i = 0; i < InputManager.DiscreteHitQueue.Count; i++)
         {
             HitPlayer hitObject = InputManager.DiscreteHitQueue[i];
 
-            double time = judgementOffsetTime - hitObject.Time;
-
-            if (hitObject.Current.Flickable)
+            if (!hitObject)
             {
-                hitObject.InDiscreteHitQueue = false;
-                InputManager.DiscreteHitQueue.Remove(hitObject);
+                InputManager.DiscreteHitQueue.RemoveAt(i--);
                 continue;
             }
 
-            if (judgementOffsetTime >= hitObject.Time && hitObject.Current.Type == HitObject.HitType.Catch)
-            {
-                if (!hitObject.IsProcessed)
-                    Player.Hit(hitObject, time);
+            if (!IsCatchHead(hitObject))
+                continue;
 
-                hitObject.InDiscreteHitQueue = false;
-                hitObject.IsProcessed        = true;
+            if (judgementOffsetTime < hitObject.Time)
+                continue;
 
-                foreach (KeyClass key in KeyClasses.Values)
-                    if (key.QueuedHit == hitObject)
-                    {
-                        key.QueuedHit                  = null;
-                        key.DiscreteHitobjectIsInRange = false;
-                    }
+            if (!hitObject.IsProcessed)
+                Player.Hit(hitObject, judgementOffsetTime - hitObject.Time);
 
-                EnqueueHoldNote(hitObject: hitObject);
-
-                if (!hitObject) continue;
-                InputManager.DiscreteHitQueue.Remove(hitObject);
-            }
-        }
-
-        // ── Queued-hit resolver ───────────────────────────────────────────────
-        // Fires QueuedHit for every Initial key — mirrors TouchClass queued-hit resolver.
-
-        foreach (KeyClass key in KeyClasses.Values)
-        {
-            if (key.QueuedHit &&
-                !key.QueuedHit.IsProcessed &&
-                key.QueuedHit.Current.Type == HitObject.HitType.Normal &&
-                !key.QueuedHit.Current.Flickable)
-            {
-                Player.Hit(
-                    key.QueuedHit,
-                    key.PressTime + Player.Settings.JudgmentOffset - key.QueuedHit.Time
-                );
-                key.QueuedHit.IsProcessed = true;
-                EnqueueHoldNote(key.QueuedHit);
-                key.QueuedHit         = null;
-                key.QueuedHitDistance = 0;
-            }
-
-            key.Initial = false; // Initial only lasts one tick.
-        }
-
-        // ── Cue tick ──────────────────────────────────────────────────────────
-        PCMouseOwnershipCueManager.sMain?.UpdateCue(Time.deltaTime);
-    }
-
-    // ─────────────────────────────────────────────────────────────────────────────
-    // HitobjectProcessor — mirrors PlayerInputManager.HitobjectProcessor
-    // ─────────────────────────────────────────────────────────────────────────────
-
-    private void HitobjectProcessor(HitPlayer hitobject, double hitobjectTimingDelta, ref bool alreadyHit)
-    {
-        if (hitobject.Current.Flickable)
-        {
-            // Flick notes — mouse only, keyboard not involved.
-            // Mirrors PlayerInputManager.HitobjectProcessor flick branch verbatim,
-            // replacing TouchClass with MouseClass (single cursor).
-
-            float screenDpi_     = Screen.dpi > 0 ? Screen.dpi : 100f;
-            float flickThreshold_ = screenDpi_ * 0.2f;
-
-            // Tap-flick: any Initial key that has tapped near the note acts as the
-            // "Tapped" signal (equivalent to touch.Tapped). We check all Initial keys.
-            bool anyKeyTapped = false;
-            Vector2 tapStartPos = Vector2.zero;
-            float tapStartDist  = float.MaxValue;
-
-            foreach (KeyClass key in KeyClasses.Values)
-            {
-                if (!key.Initial) continue;
-                float d = Vector2.Distance(key.PressPosition, hitobject.HitCoord.Position);
-                if (d < tapStartDist) { tapStartDist = d; tapStartPos = key.PressPosition; anyKeyTapped = true; }
-            }
-
-            bool isValid = false;
-
-            switch (hitobject.Current.Type)
-            {
-                case HitObject.HitType.Normal:
-                    isValid = TapFlickVerifier(hitobject, tapStartPos, tapStartDist, anyKeyTapped, flickThreshold_);
-                    break;
-
-                case HitObject.HitType.Catch:
-                    isValid = FlickVerifier(hitobject, flickThreshold_);
-                    break;
-            }
-
-            if (!isValid) return;
-
-            if (!hitobject.IsProcessed)
-            {
-                Player.Hit(hitobject, hitobjectTimingDelta);
-                hitobject.IsProcessed = true;
-                EnqueueHoldNote(hitobject);
-            }
-
-            // Reset flick state.
-            Mouse_.Flicked        = false;
-            Mouse_.flickDirection = 0;
-            Mouse_.LastFlickHitTime = Player.CurrentTime;
-
-            foreach (KeyClass key in KeyClasses.Values)
-            {
-                if (key.QueuedHit == hitobject) { key.QueuedHit = null; key.QueuedHitDistance = 0; }
-                key.DiscreteHitobjectIsInRange = false;
-            }
-
-            if (hitobject.Current.Type == HitObject.HitType.Catch)
-                foreach (KeyClass key in KeyClasses.Values)
-                    key.DiscreteHitobjectIsInRange = true;
-
-            alreadyHit = true;
-            return;
-        }
-
-        switch (hitobject.Current.Type)
-        {
-            case HitObject.HitType.Normal:
-                // Any Initial key claims the next note in timing window — purely key-based,
-                // no cursor proximity. Discrete tap-protection is preserved (same logic as
-                // touch pipeline) since a catch note arriving just before a tap note should
-                // still gate correctly.
-                foreach (KeyClass key in KeyClasses.Values)
-                {
-                    if (!key.Initial) continue;
-
-                    var discreteTapProtectionPassed = false;
-
-                    if ((discreteTapProtectionPassed =
-                            !(key.DiscreteHitobjectIsInRange &&
-                              key.NearestDiscreteHitobject != null &&
-                              key.NearestDiscreteHitobject.Current.Type == HitObject.HitType.Catch &&
-                              key.NearestDiscreteHitobject.Time < hitobject.Time &&
-                              hitobject.Time >= -Player.GoodWindow &&
-                              hitobject.Time - key.NearestDiscreteHitobject.Time <= Player.GoodWindow * 2
-                            ) ||
-                            (key.DiscreteHitobjectIsInRange &&
-                             key.NearestDiscreteHitobject != null &&
-                             (Math.Abs(hitobjectTimingDelta) <= Player.PerfectWindow ||
-                              Mathf.Approximately(hitobject.Time, key.NearestDiscreteHitobject.Time) ||
-                              Mathf.Approximately(
-                                  Vector3.Distance(hitobject.HitCoord.Position,
-                                                   key.NearestDiscreteHitobject.HitCoord.Position),
-                                  hitobject.HitCoord.Radius / 2)
-                             ))
-                        ) &&
-                        !key.QueuedHit // Each key claims at most one note per press.
-                       )
-                    {
-                        key.QueuedHit = hitobject;
-                        alreadyHit    = true;
-                    }
-                }
-                return;
-
-            case HitObject.HitType.Catch:
-                // Catch: any held key within the cooldown gate can claim it.
-                // No Initial check — resting keys clear catch notes too.
-                foreach (KeyClass key in KeyClasses.Values)
-                {
-                    if (hitobject.InDiscreteHitQueue) break; // Already queued.
-
-                    // Gate: per-key cooldown + cursor proximity.
-                    if (!CanKeyClearCatch(key, hitobject)) continue;
-
-                    hitobject.InDiscreteHitQueue   = true;
-                    key.DiscreteHitobjectIsInRange = true;
-                    key.CatchCooldownExpiry        = Player.CurrentTime + 60f / GetCurrentBPM() / 16f;
-                    alreadyHit                     = true;
-                }
-                return;
+            hitObject.InDiscreteHitQueue = false;
+            hitObject.IsProcessed = true;
+            EnqueueHoldNote(hitObject);
+            InputManager.DiscreteHitQueue.RemoveAt(i--);
         }
     }
 
-    // ─────────────────────────────────────────────────────────────────────────────
-    // HoldQueue_Processor — verbatim mirror of PlayerInputManager's
-    // ─────────────────────────────────────────────────────────────────────────────
-
-    private void HoldQueue_Processor(HoldNoteClass holdNoteEntry, ref int queuePtr, float beat, double judgementOffsetTime)
+    private void ResolveQueuedTapHits()
     {
-        if (!holdNoteEntry.HitObject)
+        foreach (PCKeyState keyState in _Keys.Values)
         {
-            NotifyHoldReleased(holdNoteEntry.HitObject);
-            InputManager.HoldQueue.RemoveAt(queuePtr--);
+            HitPlayer queuedHit = keyState.QueuedHit;
+            if (!queuedHit || queuedHit.IsProcessed || !IsTapHead(queuedHit))
+                continue;
+
+            Player.Hit(
+                queuedHit,
+                keyState.PressTime + Player.Settings.JudgmentOffset - queuedHit.Time
+            );
+
+            queuedHit.IsProcessed = true;
+            EnqueueHoldNote(queuedHit);
+            keyState.QueuedHit = null;
+        }
+    }
+
+    private void ProcessHoldQueue(double judgementOffsetTime)
+    {
+        if (InputManager.HoldQueue.Count == 0)
+            return;
+
+        float beat = PlayerScreen.sTargetSong.Timing.ToBeat((float)judgementOffsetTime);
+        var currentCamera = (CameraController)PlayerScreen.sTargetChart.Data.Camera.GetStoryboardableObject(beat);
+
+        Player.Pseudocamera.transform.position = currentCamera.CameraPivot;
+        Player.Pseudocamera.transform.eulerAngles = currentCamera.CameraRotation;
+        Player.Pseudocamera.transform.Translate(Vector3.back * currentCamera.PivotDistance);
+
+        for (int i = 0; i < InputManager.HoldQueue.Count; i++)
+            ProcessHoldNote(InputManager.HoldQueue[i], ref i, beat, judgementOffsetTime);
+    }
+
+    private void ProcessHoldNote(HoldNoteClass holdNote, ref int queueIndex, float beat, double judgementOffsetTime)
+    {
+        if (!holdNote.HitObject)
+        {
+            InputManager.HoldQueue.RemoveAt(queueIndex--);
             return;
         }
 
-        var laneHoldNote = (Lane)holdNoteEntry.HitObject.Lane.Original.GetStoryboardableObject(beat);
+        var lane = (Lane)holdNote.HitObject.Lane.Original.GetStoryboardableObject(beat);
+        LanePosition lanePosition = lane.GetLanePosition(beat, beat, PlayerScreen.sTargetSong.Timing);
 
-        LanePosition step = laneHoldNote.GetLanePosition(beat, beat, PlayerScreen.sTargetSong.Timing);
+        Vector3 startPosition = lane.Position + Quaternion.Euler(lane.Rotation) * lanePosition.StartPosition;
+        Vector3 endPosition = lane.Position + Quaternion.Euler(lane.Rotation) * lanePosition.EndPosition;
 
-        Vector3 startHoldPosition = laneHoldNote.Position + Quaternion.Euler(laneHoldNote.Rotation) * step.StartPosition;
-        Vector3 endHoldPosition   = laneHoldNote.Position + Quaternion.Euler(laneHoldNote.Rotation) * step.EndPosition;
-
-        LaneGroupPlayer currentHoldGroupPlayer = holdNoteEntry.HitObject.Lane.Group;
-
-        while (currentHoldGroupPlayer)
+        LaneGroupPlayer groupPlayer = holdNote.HitObject.Lane.Group;
+        while (groupPlayer)
         {
-            var currentLaneGroup = (LaneGroup)currentHoldGroupPlayer.Original.GetStoryboardableObject(beat);
-            startHoldPosition = currentLaneGroup.Position + Quaternion.Euler(currentLaneGroup.Rotation) * startHoldPosition;
-            endHoldPosition   = currentLaneGroup.Position + Quaternion.Euler(currentLaneGroup.Rotation) * endHoldPosition;
-            currentHoldGroupPlayer = currentHoldGroupPlayer.Parent;
+            var group = (LaneGroup)groupPlayer.Original.GetStoryboardableObject(beat);
+            startPosition = group.Position + Quaternion.Euler(group.Rotation) * startPosition;
+            endPosition = group.Position + Quaternion.Euler(group.Rotation) * endPosition;
+            groupPlayer = groupPlayer.Parent;
         }
 
-        var hitObject = (HitObject)holdNoteEntry.HitObject.Original.GetStoryboardableObject(beat);
+        var hitObject = (HitObject)holdNote.HitObject.Original.GetStoryboardableObject(beat);
+        Vector3 holdStart = Vector3.LerpUnclamped(startPosition, endPosition, hitObject.Position);
+        Vector3 holdEnd = Vector3.LerpUnclamped(startPosition, endPosition, hitObject.Position + hitObject.Length);
 
-        Vector3 holdNoteLerpStart = Vector3.LerpUnclamped(startHoldPosition, endHoldPosition, hitObject.Position);
-        Vector3 holdNoteLerpEnd   = Vector3.LerpUnclamped(startHoldPosition, endHoldPosition, hitObject.Position + hitObject.Length);
+        Vector2 screenStart = Player.Pseudocamera.WorldToScreenPoint(holdStart);
+        Vector2 screenEnd = Player.Pseudocamera.WorldToScreenPoint(holdEnd);
 
-        Vector2 holdNoteHitboxStart = Player.Pseudocamera.WorldToScreenPoint(holdNoteLerpStart);
-        Vector2 holdNoteHitboxEnd   = Player.Pseudocamera.WorldToScreenPoint(holdNoteLerpEnd);
-
-        holdNoteEntry.HitObject.HitCoord = new HitScreenCoord
+        holdNote.HitObject.HitCoord = new HitScreenCoord
         {
-            Position = (holdNoteHitboxStart + holdNoteHitboxEnd) / 2,
-            Radius   = Mathf.Max(
-                Vector2.Distance(holdNoteHitboxStart, holdNoteHitboxEnd) / 2 + Player.ScaledExtraRadius,
+            Position = (screenStart + screenEnd) / 2,
+            Radius = Mathf.Max(
+                Vector2.Distance(screenStart, screenEnd) / 2 + Player.ScaledExtraRadius,
                 Player.ScaledMinimumRadius
             )
         };
 
-        // Hold: any key within the hitbox counts, mirroring touch AssignedTouch check.
-        holdNoteEntry.IsPlayerHolding = KeyClasses.Count > 0 &&
-            Vector2.Distance(CursorPos(), holdNoteEntry.HitObject.HitCoord.Position)
-            <= holdNoteEntry.HitObject.HitCoord.Radius;
+        SnapCursorToHoldOnce(holdNote.HitObject);
 
-        holdNoteEntry.holdPassDrainValue = Mathf.Clamp01(
-            holdNoteEntry.holdPassDrainValue + Time.deltaTime / Player.PassWindow
-            * (holdNoteEntry.IsPlayerHolding ? 1f : -1f)
+        holdNote.IsPlayerHolding = HasHeldKey() &&
+            Mouse.current != null &&
+            Vector2.Distance(Mouse.current.position.ReadValue(), holdNote.HitObject.HitCoord.Position) <=
+            holdNote.HitObject.HitCoord.Radius;
+
+        holdNote.holdPassDrainValue = Mathf.Clamp01(
+            holdNote.holdPassDrainValue + Time.deltaTime / Player.PassWindow *
+            (holdNote.IsPlayerHolding ? 1f : -1f)
         );
 
-        if (!holdNoteEntry.IsScoring && holdNoteEntry.holdPassDrainValue >= 1)
-            holdNoteEntry.IsScoring = true;
-        else if (holdNoteEntry.IsScoring && holdNoteEntry.holdPassDrainValue == 0)
-            holdNoteEntry.IsScoring = false;
+        if (!holdNote.IsScoring && holdNote.holdPassDrainValue >= 1)
+            holdNote.IsScoring = true;
+        else if (holdNote.IsScoring && holdNote.holdPassDrainValue == 0)
+            holdNote.IsScoring = false;
 
-        while (holdNoteEntry.HitObject.HoldTicks.Count > 0 &&
-               holdNoteEntry.HitObject.HoldTicks[0] <= judgementOffsetTime + float.Epsilon)
+        while (holdNote.HitObject.HoldTicks.Count > 0 &&
+               holdNote.HitObject.HoldTicks[0] <= judgementOffsetTime + float.Epsilon)
         {
-            Player.AddScore(holdNoteEntry.IsScoring ? 1 : 0, null);
-
+            Player.AddScore(holdNote.IsScoring ? 1 : 0, null);
             Player.HitObjectHistory.Add(new HitObjectHistoryItem(
-                holdNoteEntry.HitObject.HoldTicks[0],
+                holdNote.HitObject.HoldTicks[0],
                 HitObjectHistoryType.Catch,
-                holdNoteEntry.IsScoring ? 0 : float.PositiveInfinity
+                holdNote.IsScoring ? 0 : float.PositiveInfinity
             ));
 
-            holdNoteEntry.HitObject.HoldTicks.RemoveAt(0);
+            holdNote.HitObject.HoldTicks.RemoveAt(0);
 
-            if (holdNoteEntry.IsScoring)
+            if (holdNote.IsScoring)
             {
-                Color interfaceColor = new Color(
+                Color interfaceColor = new(
                     PlayerScreen.sCurrentChart.Palette.InterfaceColor.r,
                     PlayerScreen.sCurrentChart.Palette.InterfaceColor.g,
                     PlayerScreen.sCurrentChart.Palette.InterfaceColor.b,
                     0.32f
                 );
-                var effect = PlayerScreen.sMain.JudgeScreenManager.BorrowEffect(holdNoteEntry.HitObject, null, interfaceColor);
-                var rt     = (RectTransform)effect.transform;
-                rt.position = Player.Pseudocamera.WorldToScreenPoint(holdNoteEntry.HitObject.transform.position);
+                var effect = PlayerScreen.sMain.JudgeScreenManager.BorrowEffect(holdNote.HitObject, null, interfaceColor);
+                var rt = (RectTransform)effect.transform;
+                rt.position = Player.Pseudocamera.WorldToScreenPoint(holdNote.HitObject.transform.position);
             }
         }
 
-        if (holdNoteEntry.HitObject.HoldTicks.Count <= 0)
+        if (holdNote.HitObject.HoldTicks.Count <= 0)
         {
-            NotifyHoldReleased(holdNoteEntry.HitObject);
-            Player.RemoveHitPlayer(holdNoteEntry.HitObject);
-            InputManager.HoldQueue.RemoveAt(queuePtr--);
+            _SnappedHoldHeads.Remove(holdNote.HitObject);
+            Player.RemoveHitPlayer(holdNote.HitObject);
+            InputManager.HoldQueue.RemoveAt(queueIndex--);
         }
     }
 
-    // ─────────────────────────────────────────────────────────────────────────────
-    // Helpers
-    // ─────────────────────────────────────────────────────────────────────────────
+    private void EndFrameKeyLifecycle()
+    {
+        _KeysToRemove.Clear();
+
+        foreach (KeyValuePair<Key, PCKeyState> pair in _Keys)
+        {
+            pair.Value.Initial = false;
+
+            if (pair.Value.Released)
+                _KeysToRemove.Add(pair.Key);
+        }
+
+        foreach (Key key in _KeysToRemove)
+            _Keys.Remove(key);
+
+        _KeysToRemove.Clear();
+    }
+
+    private void ClearQueuedHit(HitPlayer hitObject)
+    {
+        foreach (PCKeyState keyState in _Keys.Values)
+            if (keyState.QueuedHit == hitObject)
+                keyState.QueuedHit = null;
+    }
 
     private void EnqueueHoldNote(HitPlayer hitObject, bool missed = false)
     {
-        if (!hitObject.PendingHoldQueue) return;
+        if (!hitObject.PendingHoldQueue)
+            return;
 
         InputManager.HoldQueue.Add(new HoldNoteClass
         {
-            HitObject          = hitObject,
+            HitObject = hitObject,
+            IsPlayerHolding = HasHeldKey(),
             holdPassDrainValue = missed ? 0 : 1,
-            IsPlayerHolding    = KeyClasses.Count > 0,
         });
-
-        if (hitObject.Current.HoldLength > 0 || hitObject.Current.Flickable)
-        {
-            LaneStep laneStep = hitObject.Lane?.Current?.LaneSteps?.Count > 0
-                ? hitObject.Lane.Current.LaneSteps[0] : null;
-            EnqueueMouseCandidate(hitObject, laneStep);
-        }
     }
 
-    /// <summary>
-    ///     Returns the current cursor screen position. All hitbox checks use this
-    ///     so the cursor is the single spatial reference point, equivalent to a
-    ///     touch's <c>screenPosition</c>.
-    /// </summary>
-    private Vector2 CursorPos() =>
-        Mouse.current != null ? Mouse.current.position.ReadValue() : Vector2.zero;
-
-    /// <summary>
-    ///     Per-key cooldown gate for catch notes.
-    ///     A key on cooldown is only permitted to clear a catch note if the cursor
-    ///     intersects the note's hitbox — meaning the notes are spatially close enough
-    ///     that a single input covers them naturally.
-    /// </summary>
-    private bool CanKeyClearCatch(KeyClass key, HitPlayer note)
+    private void SnapCursorToHoldOnce(HitPlayer hitObject)
     {
-        bool cooldownExpired  = Player.CurrentTime >= key.CatchCooldownExpiry;
-        bool cursorIntersects = Vector2.Distance(CursorPos(), note.HitCoord.Position)
-                                <= note.HitCoord.Radius;
-        return cooldownExpired || cursorIntersects;
+        if (_SnappedHoldHeads.Contains(hitObject))
+            return;
+
+        if (Mouse.current == null)
+            return;
+
+        Mouse.current.WarpCursorPosition(hitObject.HitCoord.Position);
+        InputState.Change(Mouse.current.position, hitObject.HitCoord.Position);
+        _SnappedHoldHeads.Add(hitObject);
     }
 
-    private float GetCurrentBPM() =>
-        PlayerScreen.sTargetSong?.Timing.GetStop((float)Player.CurrentTime, out int _).BPM ?? 120f;
-
-    // ─────────────────────────────────────────────────────────────────────────────
-    // Flick verifiers — ported from PlayerInputManager local functions,
-    // TouchClass replaced with MouseClass (single cursor).
-    // ─────────────────────────────────────────────────────────────────────────────
-
-    private bool TapFlickVerifier(HitPlayer hitObject, Vector2 tapStartPos, float tapStartDist, bool anyKeyTapped, float flickThreshold)
+    private bool HasHeldKey()
     {
-        if (!anyKeyTapped) return false;
-
-        bool positionValid;
-        if (float.IsFinite(hitObject.Current.FlickDirection))
-        {
-            // Directional tap flick: corridor check.
-            float corridorDist = Mathf.Abs(
-                (Quaternion.Euler(0, 0, hitObject.Current.FlickDirection) *
-                 (tapStartPos - hitObject.HitCoord.Position)).x);
-            positionValid = corridorDist < hitObject.HitCoord.Radius + flickThreshold;
-        }
-        else
-        {
-            // Omnidirectional: simple radius check.
-            positionValid = tapStartDist < hitObject.HitCoord.Radius;
-        }
-
-        if (!positionValid) return false;
-
-        return FlickVerifier(hitObject, flickThreshold, Mouse_.flickDirection);
-    }
-
-    private bool FlickVerifier(HitPlayer hitObject, float flickThreshold, float? angle = null)
-    {
-        // Catch-flick range check: cursor must be in or have been in hitbox.
-        if (!Mouse_.Flicked &&
-            hitObject.Current.Type == HitObject.HitType.Catch &&
-            Vector2.Distance(Mouse_.FlickCenter, hitObject.HitCoord.Position) > hitObject.HitCoord.Radius &&
-            Vector2.Distance(CursorPos(),        hitObject.HitCoord.Position) > hitObject.HitCoord.Radius)
-            return false;
-
-        if (!float.IsNaN(hitObject.Current.FlickDirection))
-        {
-            // Tap-flick on directional: corridor already validates position implies direction.
-            if (hitObject.Current.Type == HitObject.HitType.Normal && !Mouse_.Flicked)
+        foreach (PCKeyState keyState in _Keys.Values)
+            if (!keyState.Released)
                 return true;
 
-            float calculatedAngle = angle ?? Mouse_.flickDirection;
-            return ValidateFlickDirection(hitObject.Current.FlickDirection, calculatedAngle);
-        }
-
-        // Omnidirectional:
-        // - Tap-flick Normal: tap position implies intent, velocity not yet reliable on first frame.
-        // - Catch-flick: velocity pre-gate (IsGesturing) is the sole confirmation.
-        return hitObject.Current.Type == HitObject.HitType.Normal || Mouse_.IsGesturing;
+        return false;
     }
 
-    private static bool ValidateFlickDirection(float expected, float actual)
-    {
-        float absDiff = Mathf.Abs(Mathf.DeltaAngle(expected, actual));
-        return absDiff <= 25f || absDiff <= 27.5f;
-    }
+    private static bool IsTapHead(HitPlayer hitObject) =>
+        hitObject.Current.Type == HitObject.HitType.Normal &&
+        !hitObject.Current.Flickable;
 
-    // ─────────────────────────────────────────────────────────────────────────────
-    // Mouse ownership queue
-    // ─────────────────────────────────────────────────────────────────────────────
-
-    private void EnqueueMouseCandidate(HitPlayer note, LaneStep laneStep)
-    {
-        if (note == null) return;
-
-        var entry = new PCOwnershipEntry
-        {
-            Note        = note,
-            LaneStep    = laneStep,
-            EnqueueTime = Player.CurrentTime,
-        };
-
-        if (_OwnershipQueue.Count == 0)
-        {
-            _OwnershipQueue.Add(entry);
-            GrantOwnership(entry);
-            return;
-        }
-
-        if (!IsCursorOccupiedOrWarm())
-        {
-            _OwnershipQueue.Insert(0, entry);
-            GrantOwnership(entry);
-        }
-        else
-        {
-            int idx = FindPriorityInsertIndex(entry);
-            _OwnershipQueue.Insert(idx, entry);
-            if (idx == 0) GrantOwnership(entry);
-        }
-    }
-
-    private void NotifyHoldReleased(HitPlayer note)
-    {
-        if (note == null) return;
-        int idx = _OwnershipQueue.FindIndex(e => e.Note == note);
-        if (idx < 0) return;
-
-        bool wasOwner = idx == 0;
-        _OwnershipQueue.RemoveAt(idx);
-
-        if (wasOwner)
-        {
-            _LastHoldReleaseTime = Player.CurrentTime;
-            if (_OwnershipQueue.Count > 0)
-                GrantOwnership(_OwnershipQueue[0]);
-            else
-                PCMouseOwnershipCueManager.sMain?.OnOwnerChanged(null, 0, 0);
-        }
-    }
-
-    private void GrantOwnership(PCOwnershipEntry entry)
-    {
-        Mouse.current?.WarpCursorPosition(entry.Note.HitCoord.Position);
-        PCMouseOwnershipCueManager.sMain?.OnOwnerChanged(entry.Note, GetLaneScreenRotation(entry.Note), GetApproachDuration(entry.Note));
-    }
-
-    // ─────────────────────────────────────────────────────────────────────────────
-    // Priority stack
-    // ─────────────────────────────────────────────────────────────────────────────
-
-    private bool IsCursorOccupiedOrWarm()
-    {
-        if (_OwnershipQueue.Count > 0) return true;
-        float bpm    = PlayerScreen.sTargetSong?.Timing.GetStop((float)Player.CurrentTime, out int _).BPM ?? 120f;
-        float window = bpm / 4f / 1000f;
-        return (Player.CurrentTime - _LastHoldReleaseTime) <= window;
-    }
-
-    private int FindPriorityInsertIndex(PCOwnershipEntry newEntry)
-    {
-        for (int i = 0; i < _OwnershipQueue.Count; i++)
-            if (CompareOwnershipPriority(newEntry, _OwnershipQueue[i]) > 0) return i;
-        return _OwnershipQueue.Count;
-    }
-
-    private int CompareOwnershipPriority(PCOwnershipEntry a, PCOwnershipEntry b)
-    {
-        int rA = GetEasingRank(a), rB = GetEasingRank(b);
-        if (rA != rB) return rB - rA;
-
-        float dA = SampleFloatDelta(a), dB = SampleFloatDelta(b);
-        if (dA >= 0.2f || dB >= 0.2f) { int c = dA.CompareTo(dB); if (c != 0) return c; }
-
-        int fc = CompareFlickSpecificity(a, b);
-        if (fc != 0) return fc;
-
-        Vector2 cursor = CursorPos();
-        float   distA  = Vector2.Distance(cursor, a.Note?.HitCoord.Position ?? Vector2.zero);
-        float   distB  = Vector2.Distance(cursor, b.Note?.HitCoord.Position ?? Vector2.zero);
-        int     dc     = distB.CompareTo(distA);
-        if (dc != 0) return dc;
-
-        return a.EnqueueTime > b.EnqueueTime ? 1 : -1;
-    }
-
-    private int GetEasingRank(PCOwnershipEntry entry)
-    {
-        if (SampleFloatDelta(entry) < 0.001f) return -1;
-        if (entry.LaneStep?.StartEaseX is BasicEaseDirective basic)
-            for (int i = 0; i < sr_EasingRank.Length; i++)
-                if (sr_EasingRank[i] == basic.Function) return i;
-        return sr_EasingRank.Length;
-    }
-
-    private float SampleFloatDelta(PCOwnershipEntry entry)
-    {
-        if (entry.Note?.Original == null || entry.LaneStep == null) return 0f;
-        const int SampleCount = 8; const float BeatWindow = 2f;
-        float beat0      = PlayerScreen.sTargetSong?.Timing.ToBeat((float)Player.CurrentTime) ?? 0f;
-        float laneLength = Vector2.Distance(entry.LaneStep.StartPointPosition, entry.LaneStep.EndPointPosition);
-        float sum = 0f, prev = float.NaN;
-        for (int i = 0; i <= SampleCount; i++)
-        {
-            float b = beat0 + (i / (float)SampleCount) * BeatWindow;
-            float p; try { p = ((HitObject)entry.Note.Original.GetStoryboardableObject(b))?.Position ?? 0f; } catch { p = entry.Note.Current?.Position ?? 0f; }
-            if (!float.IsNaN(prev)) sum += Mathf.Abs(p - prev) * laneLength;
-            prev = p;
-        }
-        return sum;
-    }
-
-    private static int CompareFlickSpecificity(PCOwnershipEntry a, PCOwnershipEntry b)
-    {
-        bool aD = a.Note != null && float.IsFinite(a.Note.Current?.FlickDirection ?? float.NaN);
-        bool bD = b.Note != null && float.IsFinite(b.Note.Current?.FlickDirection ?? float.NaN);
-        if (aD && !bD) return 1; if (!aD && bD) return -1;
-        if (aD) { float d = Mathf.Abs(Mathf.DeltaAngle(a.Note.Current.FlickDirection, b.Note.Current.FlickDirection)); return d > 0 ? 1 : 0; }
-        return 0;
-    }
-
-    private float GetLaneScreenRotation(HitPlayer note)
-    {
-        if (note?.Lane?.Current == null || Player?.Pseudocamera == null) return 0f;
-        var steps = note.Lane.Current.LaneSteps;
-        if (steps == null || steps.Count == 0) return 0f;
-        Vector2 s = Player.Pseudocamera.WorldToScreenPoint(note.transform.position);
-        Vector2 e = Player.Pseudocamera.WorldToScreenPoint(note.transform.position + note.transform.right);
-        Vector2 d = e - s;
-        return d.sqrMagnitude > 0.001f ? Mathf.Atan2(d.x, d.y) * Mathf.Rad2Deg : 0f;
-    }
-
-    private float GetApproachDuration(HitPlayer note)
-    {
-        if (note?.Lane?.Current?.LaneSteps == null || note.Lane.Current.LaneSteps.Count == 0) return 0.5f;
-        float rate = note.Lane.Current.LaneSteps[0].Speed * Player.Speed;
-        return rate > 0f ? 1f / rate : 0.5f;
-    }
+    private static bool IsCatchHead(HitPlayer hitObject) =>
+        hitObject.Current.Type == HitObject.HitType.Catch &&
+        !hitObject.Current.Flickable;
 }
 
-/// <summary>Entry in the mouse ownership queue for one active hold or flick note.</summary>
-public class PCOwnershipEntry
+public class PCKeyState
 {
-    public HitPlayer Note;
-    public LaneStep  LaneStep;
-    public double    EnqueueTime;
-}
-
-/// <summary>
-///     Stateful wrapper for a single held keyboard key, mirroring <c>TouchClass</c>
-///     in <see cref="PlayerInputManager"/>. Persists in <c>KeyClasses</c> from keydown
-///     to keyup, carrying per-key QueuedHit and catch cooldown state.
-/// </summary>
-public class KeyClass
-{
-    /// <summary>The physical key this wrapper represents.</summary>
     public Key KeyCode;
-
-    /// <summary>True only on the first tick after keydown — used to identify new presses.</summary>
     public bool Initial;
-
-    /// <summary>Game time (seconds) when this key was pressed.</summary>
+    public bool Released;
     public double PressTime;
-
-    /// <summary>
-    ///     Screen-space cursor position at the moment this key was pressed.
-    ///     Equivalent to <c>touch.Touch.startScreenPosition</c> — used for
-    ///     tap-flick corridor and radius checks.
-    /// </summary>
-    public Vector2 PressPosition;
-
-    /// <summary>
-    ///     The note this key has claimed to hit, resolved at end of frame.
-    ///     Mirrors <c>TouchClass.QueuedHit</c>.
-    /// </summary>
     public HitPlayer QueuedHit;
-
-    /// <summary>Distance from cursor to the queued hit at claim time. Used for nearest-note selection.</summary>
-    public float QueuedHitDistance;
-
-    /// <summary>Whether the cursor is currently within a discrete hitobject's radius.</summary>
-    public bool DiscreteHitobjectIsInRange;
-
-    /// <summary>Distance to the nearest discrete hitobject. Used for tap protection.</summary>
-    public float DiscreteHitobjectDistance;
-
-    /// <summary>The nearest discrete hitobject to this key's cursor. Used for tap protection.</summary>
-    public HitPlayer NearestDiscreteHitobject;
-
-    /// <summary>
-    ///     Game time (seconds) at which this key's catch cooldown expires.
-    ///     <c>double.NegativeInfinity</c> = no cooldown active.
-    ///     Timeout = 60 / BPM / 16 (one 1/16th note).
-    /// </summary>
-    public double CatchCooldownExpiry = double.NegativeInfinity;
-}
-
-/// <summary>
-///     Single persistent mouse state object for the PC input system.
-///     Analogous to a single <c>TouchClass</c> — there is only one cursor, so
-///     only the flick gesture and velocity tracking fields are needed here.
-///     Per-note state (QueuedHit, DiscreteHitobjectIsInRange, etc.) lives on
-///     <see cref="KeyClass"/> instead, one per held key.
-/// </summary>
-public class MouseClass
-{
-    private float _FlickDirection;
-
-    /// <summary>Velocity tracker for flick gesture pre-gating, populated each frame.</summary>
-    public VelocityTracker VelocityTracker = new();
-
-    /// <summary>
-    ///     True when the velocity tracker has detected an active swipe above the speed
-    ///     threshold. Pre-gate before the distance commit check.
-    /// </summary>
-    public bool IsGesturing;
-
-    /// <summary>The screen-space origin of the current flick gesture.</summary>
-    public Vector2 FlickCenter;
-
-    /// <summary>Whether a flick gesture has been committed this frame.</summary>
-    public bool Flicked;
-
-    /// <summary>Game time (seconds) when the flick distance threshold was crossed.</summary>
-    public double FlickTime;
-
-    /// <summary>
-    ///     Game time (seconds) when the cursor last successfully cleared a flick note.
-    ///     Raises the effective threshold briefly to prevent a continuous swipe re-triggering.
-    /// </summary>
-    public double LastFlickHitTime = float.NegativeInfinity;
-
-    /// <summary>
-    ///     When true, the naive FlickCenter reset clock is paused because a flickable
-    ///     note is approaching. FlickCenter snaps when the cursor enters the hitbox.
-    /// </summary>
-    public bool FlickCenterResetPending;
-
-    /// <summary>Accumulator for the naive FlickCenter reset clock (seconds).</summary>
-    public double FlickCenterResetClock;
-
-    /// <summary>
-    ///     The flickable note that last triggered a FlickCenter snap on hitbox entry.
-    ///     Prevents the snap from firing every frame while the cursor stays inside.
-    /// </summary>
-    public HitPlayer FlickCenterSnappedNote;
-
-    /// <summary>
-    ///     Direction of the committed flick in degrees (CW from up).
-    ///     Only stores finite values — NaN from degenerate SignedAngle is silently ignored.
-    /// </summary>
-    public float flickDirection
-    {
-        get => _FlickDirection;
-        set { if (float.IsFinite(value)) _FlickDirection = value; }
-    }
 }
