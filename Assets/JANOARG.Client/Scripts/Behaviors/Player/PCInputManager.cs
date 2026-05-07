@@ -48,6 +48,14 @@ public class PCInputManager : MonoBehaviour
     /// </summary>
     public readonly Dictionary<Key, KeyClass> KeyClasses = new();
 
+    // ─── Mouse state ─────────────────────────────────────────────────────────────
+
+    /// <summary>
+    ///     Single persistent mouse state — analogous to one <c>TouchClass</c> since
+    ///     there is only one cursor. Carries flick gesture state and velocity tracker.
+    /// </summary>
+    public readonly MouseClass Mouse_ = new();
+
     // ─── Mouse ownership state ───────────────────────────────────────────────────
 
     private readonly List<PCOwnershipEntry> _OwnershipQueue      = new();
@@ -110,9 +118,10 @@ public class PCInputManager : MonoBehaviour
             {
                 var keyClass = new KeyClass
                 {
-                    KeyCode   = key,
-                    PressTime = Player.CurrentTime,
-                    Initial   = true,
+                    KeyCode       = key,
+                    PressTime     = Player.CurrentTime,
+                    PressPosition = CursorPos(),
+                    Initial       = true,
                 };
                 KeyClasses[key] = keyClass;
             }
@@ -133,6 +142,89 @@ public class PCInputManager : MonoBehaviour
     public void UpdateInput()
     {
         _ConsumedKeys.Clear();
+
+        // ── Mouse flick tracking ──────────────────────────────────────────────
+        // Mirrors the per-frame push in the touch pipeline's active-touch loop.
+        // DPI note: matches PlayerInputManager (raw Screen.dpi). Windowed-mode
+        // scaling is a known gap to address in both engines together later.
+
+        float screenDpi      = Screen.dpi > 0 ? Screen.dpi : 100f;
+        float flickThreshold = screenDpi * 0.2f;
+        Vector2 cursorNow    = CursorPos();
+
+        if (UnityEngine.InputSystem.Mouse.current != null)
+        {
+            Mouse_.VelocityTracker.Push((float)Player.CurrentTime, cursorNow);
+            float velocityMagnitude = Mouse_.VelocityTracker.Speed().magnitude;
+            float velocityThreshold = 1.8f * (screenDpi / 275f) * screenDpi;
+            Mouse_.IsGesturing      = velocityMagnitude >= velocityThreshold;
+
+            if (!Mouse_.Flicked)
+            {
+                bool flickableApproaching = InputManager.HitQueue.Exists(hit =>
+                    hit.Current.Flickable && !hit.IsProcessed &&
+                    Math.Abs(hit.Time - Player.CurrentTime) <= Player.PassWindow * 2);
+
+                if (flickableApproaching)
+                {
+                    if (!Mouse_.FlickCenterResetPending)
+                    {
+                        Mouse_.FlickCenterResetPending = true;
+                        Mouse_.FlickCenterResetClock   = 0;
+                    }
+
+                    // Snap FlickCenter when cursor enters a flickable note's hitbox.
+                    HitPlayer enteredNote = InputManager.HitQueue.Find(hit =>
+                        hit.Current.Flickable && !hit.IsProcessed &&
+                        Vector2.Distance(cursorNow, hit.HitCoord.Position) <= hit.HitCoord.Radius);
+
+                    if (enteredNote != null && Mouse_.FlickCenterSnappedNote != enteredNote)
+                    {
+                        Mouse_.FlickCenter            = cursorNow;
+                        Mouse_.FlickCenterSnappedNote = enteredNote;
+                    }
+                }
+                else
+                {
+                    Mouse_.FlickCenterResetPending = false;
+                    Mouse_.FlickCenterResetClock  += Time.deltaTime;
+
+                    if (Mouse_.FlickCenterResetClock >= 0.08f)
+                    {
+                        Mouse_.FlickCenter           = cursorNow;
+                        Mouse_.FlickCenterResetClock = 0;
+                    }
+                }
+
+                // Track direction from threshold/2 onward for stable readings.
+                float flickDist = Vector2.Distance(cursorNow, Mouse_.FlickCenter);
+                if (flickDist >= flickThreshold / 2f)
+                    Mouse_.flickDirection = -Vector2.SignedAngle(Vector2.up, cursorNow - Mouse_.FlickCenter);
+
+                // Commit: velocity pre-gate + distance threshold.
+                if (Mouse_.IsGesturing &&
+                    (Mathf.Approximately(flickDist, flickThreshold) || flickDist > flickThreshold))
+                {
+                    Mouse_.Flicked   = true;
+                    Mouse_.FlickTime = Player.CurrentTime;
+                }
+            }
+
+            // Invalidator — mirrors touch pipeline.
+            if (Mouse_.Flicked)
+            {
+                bool flickTimedOut = Math.Abs(Player.CurrentTime - Mouse_.FlickTime) > Player.PerfectWindow;
+                bool nearAnyFlickable = InputManager.HitQueue.Exists(hit =>
+                    hit.Current.Flickable && !hit.IsProcessed &&
+                    Math.Abs(hit.Time - Player.CurrentTime) <= Player.PassWindow);
+
+                if (flickTimedOut && nearAnyFlickable)
+                {
+                    Mouse_.Flicked       = false;
+                    Mouse_.FlickCenter   = cursorNow;
+                }
+            }
+        }
 
         double judgementOffsetTime = Player.CurrentTime + Player.Settings.JudgmentOffset;
 
@@ -291,9 +383,68 @@ public class PCInputManager : MonoBehaviour
 
     private void HitobjectProcessor(HitPlayer hitobject, double hitobjectTimingDelta, ref bool alreadyHit)
     {
-        // Flick notes — mouse handles these; keyboard is not involved.
         if (hitobject.Current.Flickable)
+        {
+            // Flick notes — mouse only, keyboard not involved.
+            // Mirrors PlayerInputManager.HitobjectProcessor flick branch verbatim,
+            // replacing TouchClass with MouseClass (single cursor).
+
+            float screenDpi_     = Screen.dpi > 0 ? Screen.dpi : 100f;
+            float flickThreshold_ = screenDpi_ * 0.2f;
+
+            // Tap-flick: any Initial key that has tapped near the note acts as the
+            // "Tapped" signal (equivalent to touch.Tapped). We check all Initial keys.
+            bool anyKeyTapped = false;
+            Vector2 tapStartPos = Vector2.zero;
+            float tapStartDist  = float.MaxValue;
+
+            foreach (KeyClass key in KeyClasses.Values)
+            {
+                if (!key.Initial) continue;
+                float d = Vector2.Distance(key.PressPosition, hitobject.HitCoord.Position);
+                if (d < tapStartDist) { tapStartDist = d; tapStartPos = key.PressPosition; anyKeyTapped = true; }
+            }
+
+            bool isValid = false;
+
+            switch (hitobject.Current.Type)
+            {
+                case HitObject.HitType.Normal:
+                    isValid = TapFlickVerifier(hitobject, tapStartPos, tapStartDist, anyKeyTapped, flickThreshold_);
+                    break;
+
+                case HitObject.HitType.Catch:
+                    isValid = FlickVerifier(hitobject, flickThreshold_);
+                    break;
+            }
+
+            if (!isValid) return;
+
+            if (!hitobject.IsProcessed)
+            {
+                Player.Hit(hitobject, hitobjectTimingDelta);
+                hitobject.IsProcessed = true;
+                EnqueueHoldNote(hitobject);
+            }
+
+            // Reset flick state.
+            Mouse_.Flicked        = false;
+            Mouse_.flickDirection = 0;
+            Mouse_.LastFlickHitTime = Player.CurrentTime;
+
+            foreach (KeyClass key in KeyClasses.Values)
+            {
+                if (key.QueuedHit == hitobject) { key.QueuedHit = null; key.QueuedHitDistance = 0; }
+                key.DiscreteHitobjectIsInRange = false;
+            }
+
+            if (hitobject.Current.Type == HitObject.HitType.Catch)
+                foreach (KeyClass key in KeyClasses.Values)
+                    key.DiscreteHitobjectIsInRange = true;
+
+            alreadyHit = true;
             return;
+        }
 
         switch (hitobject.Current.Type)
         {
@@ -500,6 +651,66 @@ public class PCInputManager : MonoBehaviour
         PlayerScreen.sTargetSong?.Timing.GetStop((float)Player.CurrentTime, out int _).BPM ?? 120f;
 
     // ─────────────────────────────────────────────────────────────────────────────
+    // Flick verifiers — ported from PlayerInputManager local functions,
+    // TouchClass replaced with MouseClass (single cursor).
+    // ─────────────────────────────────────────────────────────────────────────────
+
+    private bool TapFlickVerifier(HitPlayer hitObject, Vector2 tapStartPos, float tapStartDist, bool anyKeyTapped, float flickThreshold)
+    {
+        if (!anyKeyTapped) return false;
+
+        bool positionValid;
+        if (float.IsFinite(hitObject.Current.FlickDirection))
+        {
+            // Directional tap flick: corridor check.
+            float corridorDist = Mathf.Abs(
+                (Quaternion.Euler(0, 0, hitObject.Current.FlickDirection) *
+                 (tapStartPos - hitObject.HitCoord.Position)).x);
+            positionValid = corridorDist < hitObject.HitCoord.Radius + flickThreshold;
+        }
+        else
+        {
+            // Omnidirectional: simple radius check.
+            positionValid = tapStartDist < hitObject.HitCoord.Radius;
+        }
+
+        if (!positionValid) return false;
+
+        return FlickVerifier(hitObject, flickThreshold, Mouse_.flickDirection);
+    }
+
+    private bool FlickVerifier(HitPlayer hitObject, float flickThreshold, float? angle = null)
+    {
+        // Catch-flick range check: cursor must be in or have been in hitbox.
+        if (!Mouse_.Flicked &&
+            hitObject.Current.Type == HitObject.HitType.Catch &&
+            Vector2.Distance(Mouse_.FlickCenter, hitObject.HitCoord.Position) > hitObject.HitCoord.Radius &&
+            Vector2.Distance(CursorPos(),        hitObject.HitCoord.Position) > hitObject.HitCoord.Radius)
+            return false;
+
+        if (!float.IsNaN(hitObject.Current.FlickDirection))
+        {
+            // Tap-flick on directional: corridor already validates position implies direction.
+            if (hitObject.Current.Type == HitObject.HitType.Normal && !Mouse_.Flicked)
+                return true;
+
+            float calculatedAngle = angle ?? Mouse_.flickDirection;
+            return ValidateFlickDirection(hitObject.Current.FlickDirection, calculatedAngle);
+        }
+
+        // Omnidirectional:
+        // - Tap-flick Normal: tap position implies intent, velocity not yet reliable on first frame.
+        // - Catch-flick: velocity pre-gate (IsGesturing) is the sole confirmation.
+        return hitObject.Current.Type == HitObject.HitType.Normal || Mouse_.IsGesturing;
+    }
+
+    private static bool ValidateFlickDirection(float expected, float actual)
+    {
+        float absDiff = Mathf.Abs(Mathf.DeltaAngle(expected, actual));
+        return absDiff <= 25f || absDiff <= 27.5f;
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────────
     // Mouse ownership queue
     // ─────────────────────────────────────────────────────────────────────────────
 
@@ -677,6 +888,13 @@ public class KeyClass
     public double PressTime;
 
     /// <summary>
+    ///     Screen-space cursor position at the moment this key was pressed.
+    ///     Equivalent to <c>touch.Touch.startScreenPosition</c> — used for
+    ///     tap-flick corridor and radius checks.
+    /// </summary>
+    public Vector2 PressPosition;
+
+    /// <summary>
     ///     The note this key has claimed to hit, resolved at end of frame.
     ///     Mirrors <c>TouchClass.QueuedHit</c>.
     /// </summary>
@@ -700,4 +918,65 @@ public class KeyClass
     ///     Timeout = 60 / BPM / 16 (one 1/16th note).
     /// </summary>
     public double CatchCooldownExpiry = double.NegativeInfinity;
+}
+
+/// <summary>
+///     Single persistent mouse state object for the PC input system.
+///     Analogous to a single <c>TouchClass</c> — there is only one cursor, so
+///     only the flick gesture and velocity tracking fields are needed here.
+///     Per-note state (QueuedHit, DiscreteHitobjectIsInRange, etc.) lives on
+///     <see cref="KeyClass"/> instead, one per held key.
+/// </summary>
+public class MouseClass
+{
+    private float _FlickDirection;
+
+    /// <summary>Velocity tracker for flick gesture pre-gating, populated each frame.</summary>
+    public VelocityTracker VelocityTracker = new();
+
+    /// <summary>
+    ///     True when the velocity tracker has detected an active swipe above the speed
+    ///     threshold. Pre-gate before the distance commit check.
+    /// </summary>
+    public bool IsGesturing;
+
+    /// <summary>The screen-space origin of the current flick gesture.</summary>
+    public Vector2 FlickCenter;
+
+    /// <summary>Whether a flick gesture has been committed this frame.</summary>
+    public bool Flicked;
+
+    /// <summary>Game time (seconds) when the flick distance threshold was crossed.</summary>
+    public double FlickTime;
+
+    /// <summary>
+    ///     Game time (seconds) when the cursor last successfully cleared a flick note.
+    ///     Raises the effective threshold briefly to prevent a continuous swipe re-triggering.
+    /// </summary>
+    public double LastFlickHitTime = float.NegativeInfinity;
+
+    /// <summary>
+    ///     When true, the naive FlickCenter reset clock is paused because a flickable
+    ///     note is approaching. FlickCenter snaps when the cursor enters the hitbox.
+    /// </summary>
+    public bool FlickCenterResetPending;
+
+    /// <summary>Accumulator for the naive FlickCenter reset clock (seconds).</summary>
+    public double FlickCenterResetClock;
+
+    /// <summary>
+    ///     The flickable note that last triggered a FlickCenter snap on hitbox entry.
+    ///     Prevents the snap from firing every frame while the cursor stays inside.
+    /// </summary>
+    public HitPlayer FlickCenterSnappedNote;
+
+    /// <summary>
+    ///     Direction of the committed flick in degrees (CW from up).
+    ///     Only stores finite values — NaN from degenerate SignedAngle is silently ignored.
+    /// </summary>
+    public float flickDirection
+    {
+        get => _FlickDirection;
+        set { if (float.IsFinite(value)) _FlickDirection = value; }
+    }
 }
