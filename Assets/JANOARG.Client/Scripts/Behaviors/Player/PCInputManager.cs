@@ -43,6 +43,7 @@ public class PCInputManager : MonoBehaviour
     private HitPlayer _FlickCenterSnappedNote;
     private bool _SystemCursorWasOutsideWindow;
     private int _CursorMotionSuppressionFrames;
+    private CursorLockMode _PreviousLockState = CursorLockMode.None;
 
     private Action<InputEventPtr, InputDevice> _OnInputEvent;
 
@@ -499,7 +500,9 @@ public class PCInputManager : MonoBehaviour
         if (_SnappedHoldHeads.Contains(hitObject))
             return;
 
-        SetCursorPosition(hitObject.HitCoord.Position);
+        // Preserve flick state during hold snaps — this is a positional correction,
+        // not a user-initiated warp, so the velocity history remains valid.
+        SetCursorPosition(hitObject.HitCoord.Position, resetFlickState: false);
         _SnappedHoldHeads.Add(hitObject);
     }
 
@@ -572,16 +575,30 @@ public class PCInputManager : MonoBehaviour
         SyncCursorVisual();
     }
 
-    private void SetCursorPosition(Vector2 position)
+    private void SetCursorPosition(Vector2 position, bool resetFlickState = true)
     {
         _CursorPosition = position;
         _HasCursorPosition = true;
-        _FlickCenter = position;
-        _HasFlickCenter = true;
-        _FlickVelocityTracker.Reset();
-        _CursorMotionSuppressionFrames = 1;
+
+        // Only reset FlickCenter and velocity history when this is an intentional
+        // position warp (e.g. startup, re-entry from outside window). During hold
+        // takeover snaps we preserve ongoing flick tracking so a hold → flick
+        // transition isn't broken by the snap.
+        if (resetFlickState)
+        {
+            _FlickCenter = position;
+            _HasFlickCenter = true;
+            _FlickVelocityTracker.Reset();
+        }
+
+        // Suppress delta reads for 2 frames: InputState.Change writes the new position
+        // into the input system state but the OS cursor hasn't moved, so the next frame's
+        // delta would be (oldOSPosition - newFakePosition), producing a spurious jump.
+        _CursorMotionSuppressionFrames = Mathf.Max(_CursorMotionSuppressionFrames, 2);
+
         if (Mouse.current != null)
             InputState.Change(Mouse.current.position, position);
+
         SyncCursorVisual();
     }
 
@@ -602,7 +619,19 @@ public class PCInputManager : MonoBehaviour
         CursorLockMode targetLockState = ShouldLockCursor() ? CursorLockMode.Locked : CursorLockMode.None;
 
         if (UnityEngine.Cursor.lockState != targetLockState)
+        {
             UnityEngine.Cursor.lockState = targetLockState;
+
+            // When releasing from Locked, Unity has been feeding a fake position at screen
+            // center and accumulates delta from there. On unlock, the OS cursor jumps back
+            // to wherever it physically was, producing a large spurious delta on the next
+            // frame (and sometimes the one after). Suppress motion reads for 2 frames to
+            // swallow it.
+            if (_PreviousLockState == CursorLockMode.Locked && targetLockState == CursorLockMode.None)
+                _CursorMotionSuppressionFrames = Mathf.Max(_CursorMotionSuppressionFrames, 2);
+        }
+
+        _PreviousLockState = UnityEngine.Cursor.lockState;
     }
 
     private bool ShouldLockCursor()
