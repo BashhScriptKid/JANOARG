@@ -718,7 +718,7 @@ public class PCInputManager : MonoBehaviour
                 _FlickCenterResetPending = false;
                 _FlickCenterResetClock += Time.deltaTime;
 
-                if (_FlickCenterResetClock >= 0.08f)
+                if (_FlickCenterResetClock >= 0.15f)
                 {
                     _FlickCenter = _CursorPosition;
                     _FlickCenterSnappedNote = null;
@@ -786,14 +786,23 @@ public class PCInputManager : MonoBehaviour
     {
         if (!float.IsNaN(hitObject.Current.FlickDirection))
         {
-            if (hitObject.Current.Type == HitObject.HitType.Normal && !_Flicked)
-                return true;
-
+            // Directional flick — direction must match regardless of note type.
+            // For tap-flick Normal, TapFlickVerifier already validated position;
+            // direction is still required so an accidental swipe past the note
+            // in the wrong direction doesn't count.
             float calculatedAngle = angle ?? _FlickDirection;
+            if (float.IsNaN(calculatedAngle)) return false;
             return ValidateFlickDirection(hitObject.Current.FlickDirection, calculatedAngle);
         }
 
-        return hitObject.Current.Type == HitObject.HitType.Normal || _IsGesturing;
+        // Omnidirectional: both tap-flick Normal and catch-flick require an active
+        // committed flick (_Flicked) or at minimum the velocity pre-gate (_IsGesturing)
+        // with the distance threshold already passed. _IsGesturing alone is too loose
+        // since normal cursor movement can trigger it; require _Flicked for catch-flick.
+        if (hitObject.Current.Type == HitObject.HitType.Normal)
+            return _Flicked || _IsGesturing; // Tap-flick: gesture in progress is enough.
+        else
+            return _Flicked;                 // Catch-flick: must have fully committed.
     }
 
     private static bool ValidateFlickDirection(float expected, float actual)
@@ -804,19 +813,23 @@ public class PCInputManager : MonoBehaviour
 
     private static float GetFlickThreshold(float screenDpi)
     {
-        float minDimension = Mathf.Max(1f, Mathf.Min(Screen.width, Screen.height));
+        // Primary: match the touch engine — 20% of DPI ≈ 0.5 cm of physical movement.
         float dpiThreshold = screenDpi * 0.2f;
-        float windowThreshold = minDimension * 0.04f;
 
-        return Mathf.Max(dpiThreshold, windowThreshold);
+        // Floor: on very low / virtual DPI displays (remoting, test environments) the
+        // DPI value may be unrealistically small, so require at least 2% of the shorter
+        // screen dimension. On real monitors at typical DPI this floor never activates.
+        float minDimension  = Mathf.Max(1f, Mathf.Min(Screen.width, Screen.height));
+        float windowFloor   = minDimension * 0.02f;
+
+        return Mathf.Max(dpiThreshold, windowFloor);
     }
 
     private static float GetFlickVelocityThreshold(float screenDpi)
     {
-        float minDimension = Mathf.Max(1f, Mathf.Min(Screen.width, Screen.height));
-        float sizeFactor = Mathf.Clamp(1080f / minDimension, 1f, 2.5f);
-
-        return 1.8f * (screenDpi / 275f) * screenDpi * sizeFactor;
+        // Match the touch engine exactly: 1.8 × (dpi/275) × dpi.
+        // No resolution-based scaling — DPI already normalises physical movement speed.
+        return 1.8f * (screenDpi / 275f) * screenDpi;
     }
 
     private void ClearFlickState()
