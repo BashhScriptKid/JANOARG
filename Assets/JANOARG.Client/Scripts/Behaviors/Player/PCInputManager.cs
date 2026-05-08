@@ -23,10 +23,26 @@ public class PCInputManager : MonoBehaviour
     public PlayerScreen Player;
     public PlayerInputManager InputManager;
 
+    public GameObject Cursor;
+
     private readonly Dictionary<Key, PCKeyState> _Keys = new();
     private readonly HashSet<Key> _ConsumedKeys = new();
     private readonly HashSet<HitPlayer> _SnappedHoldHeads = new();
     private readonly List<Key> _KeysToRemove = new();
+    private readonly CursorVelocityTracker _FlickVelocityTracker = new();
+    private Vector2 _CursorPosition;
+    private bool _HasCursorPosition;
+    private Vector2 _FlickCenter;
+    private bool _HasFlickCenter;
+    private bool _Flicked;
+    private bool _IsGesturing;
+    private double _FlickTime = double.NegativeInfinity;
+    private float _FlickDirection = float.NaN;
+    private bool _FlickCenterResetPending;
+    private double _FlickCenterResetClock;
+    private HitPlayer _FlickCenterSnappedNote;
+    private bool _SystemCursorWasOutsideWindow;
+    private int _CursorMotionSuppressionFrames;
 
     private Action<InputEventPtr, InputDevice> _OnInputEvent;
 
@@ -35,6 +51,9 @@ public class PCInputManager : MonoBehaviour
         sInstance = this;
         _OnInputEvent = HandleRawInputEvent;
         InputSystem.onEvent += _OnInputEvent;
+
+        UnityEngine.Cursor.visible = false;
+        CenterCursorOnStartup();
     }
 
     private void OnDestroy()
@@ -44,6 +63,9 @@ public class PCInputManager : MonoBehaviour
 
         if (sInstance == this)
             sInstance = null;
+
+        UnityEngine.Cursor.visible = true;
+        UnityEngine.Cursor.lockState = CursorLockMode.None;
     }
 
     /// <summary>Called by upstream layers to block a key from reaching gameplay input.</summary>
@@ -51,6 +73,10 @@ public class PCInputManager : MonoBehaviour
 
     public void UpdateInput()
     {
+        UpdateCursorLockState();
+        UpdateCursorState();
+        UpdateFlickState();
+
         double judgementOffsetTime = Player.CurrentTime + Player.Settings.JudgmentOffset;
 
         ProcessHitQueue(judgementOffsetTime);
@@ -60,6 +86,15 @@ public class PCInputManager : MonoBehaviour
         EndFrameKeyLifecycle();
 
         _ConsumedKeys.Clear();
+    }
+
+    public void EndCursorControl()
+    {
+        UnityEngine.Cursor.visible = true;
+        UnityEngine.Cursor.lockState = CursorLockMode.None;
+
+        if (Cursor != null)
+            Cursor.SetActive(false);
     }
 
     private void HandleRawInputEvent(InputEventPtr eventPtr, InputDevice device)
@@ -92,6 +127,7 @@ public class PCInputManager : MonoBehaviour
             KeyCode = key,
             Initial = true,
             PressTime = Player.CurrentTime,
+            PressPosition = _CursorPosition,
         };
     }
 
@@ -122,6 +158,26 @@ public class PCInputManager : MonoBehaviour
 
             if (hitObject.Current.HoldLength > 0 && !hitObject.PendingHoldQueue)
                 hitObject.PendingHoldQueue = true;
+
+            if (hitObject.Current.Flickable)
+            {
+                if (TryProcessFlickHit(hitObject, timingDelta))
+                {
+                    InputManager.HitQueue.RemoveAt(i--);
+                    continue;
+                }
+
+                if (timingDelta > Math.Max(Player.PassWindow, Player.GoodWindow))
+                {
+                    Player.Hit(hitObject, float.PositiveInfinity, false);
+                    hitObject.IsProcessed = true;
+                    ClearQueuedHit(hitObject);
+                    EnqueueHoldNote(hitObject, missed: true);
+                    InputManager.HitQueue.RemoveAt(i--);
+                }
+
+                continue;
+            }
 
             bool isTap = IsTapHead(hitObject);
             bool isCatch = IsCatchHead(hitObject);
@@ -176,6 +232,70 @@ public class PCInputManager : MonoBehaviour
 
         hitObject.InDiscreteHitQueue = true;
         return true;
+    }
+
+    private bool TryProcessFlickHit(HitPlayer hitObject, double hitobjectTimingDelta)
+    {
+        float screenDpi = Screen.dpi > 0 ? Screen.dpi : 100f;
+        float flickThreshold = GetFlickThreshold(screenDpi);
+
+        switch (hitObject.Current.Type)
+        {
+            case HitObject.HitType.Normal:
+            {
+                PCKeyState bestKey = null;
+                Vector2 bestTapStart = default;
+                float bestTapStartDist = float.MaxValue;
+
+                foreach (PCKeyState keyState in _Keys.Values)
+                {
+                    if (!keyState.Initial || keyState.QueuedHit != null)
+                        continue;
+
+                    float tapStartDist = Vector2.Distance(keyState.PressPosition, hitObject.HitCoord.Position);
+                    if (tapStartDist >= bestTapStartDist)
+                        continue;
+
+                    bestKey = keyState;
+                    bestTapStart = keyState.PressPosition;
+                    bestTapStartDist = tapStartDist;
+                }
+
+                if (bestKey == null)
+                    return false;
+
+                if (!TapFlickVerifier(hitObject, bestTapStart, bestTapStartDist, flickThreshold))
+                    return false;
+
+                if (!hitObject.IsProcessed)
+                    Player.Hit(hitObject, hitobjectTimingDelta);
+
+                hitObject.IsProcessed = true;
+                EnqueueHoldNote(hitObject);
+                bestKey.QueuedHit = hitObject;
+                ClearFlickState();
+                return true;
+            }
+
+            case HitObject.HitType.Catch:
+            {
+                if (!HasHeldKey())
+                    return false;
+
+                if (!FlickVerifier(hitObject, flickThreshold))
+                    return false;
+
+                if (!hitObject.IsProcessed)
+                    Player.Hit(hitObject, hitobjectTimingDelta);
+
+                hitObject.IsProcessed = true;
+                EnqueueHoldNote(hitObject);
+                ClearFlickState();
+                return true;
+            }
+        }
+
+        return false;
     }
 
     private void ProcessDiscreteHitQueue(double judgementOffsetTime)
@@ -283,8 +403,7 @@ public class PCInputManager : MonoBehaviour
         SnapCursorToHoldOnce(holdNote.HitObject);
 
         holdNote.IsPlayerHolding = HasHeldKey() &&
-            Mouse.current != null &&
-            Vector2.Distance(Mouse.current.position.ReadValue(), holdNote.HitObject.HitCoord.Position) <=
+            Vector2.Distance(_CursorPosition, holdNote.HitObject.HitCoord.Position) <=
             holdNote.HitObject.HitCoord.Radius;
 
         holdNote.holdPassDrainValue = Mathf.Clamp01(
@@ -339,6 +458,9 @@ public class PCInputManager : MonoBehaviour
         {
             pair.Value.Initial = false;
 
+            if (pair.Value.QueuedHit != null && pair.Value.QueuedHit.Current.Flickable)
+                pair.Value.QueuedHit = null;
+
             if (pair.Value.Released)
                 _KeysToRemove.Add(pair.Key);
         }
@@ -367,6 +489,9 @@ public class PCInputManager : MonoBehaviour
             IsPlayerHolding = HasHeldKey(),
             holdPassDrainValue = missed ? 0 : 1,
         });
+
+        if (!missed)
+            RecenterCursorForGameplay();
     }
 
     private void SnapCursorToHoldOnce(HitPlayer hitObject)
@@ -374,12 +499,308 @@ public class PCInputManager : MonoBehaviour
         if (_SnappedHoldHeads.Contains(hitObject))
             return;
 
+        SetCursorPosition(hitObject.HitCoord.Position);
+        _SnappedHoldHeads.Add(hitObject);
+    }
+
+    private void CenterCursorOnStartup()
+    {
+        RecenterCursorForGameplay();
+    }
+
+    private void RecenterCursorForGameplay()
+    {
+        Vector2 center = new(
+            Screen.width > 0 ? Screen.width * 0.5f : 0f,
+            Screen.height > 0 ? Screen.height * 0.5f : 0f
+        );
+
+        SetCursorPosition(center);
+
+        if (Mouse.current != null)
+        {
+            Mouse.current.WarpCursorPosition(center);
+            InputState.Change(Mouse.current.position, center);
+        }
+    }
+
+    private void UpdateCursorState()
+    {
         if (Mouse.current == null)
             return;
 
-        Mouse.current.WarpCursorPosition(hitObject.HitCoord.Position);
-        InputState.Change(Mouse.current.position, hitObject.HitCoord.Position);
-        _SnappedHoldHeads.Add(hitObject);
+        if (_CursorMotionSuppressionFrames > 0)
+        {
+            _CursorMotionSuppressionFrames--;
+            SyncCursorVisual();
+            return;
+        }
+
+        Vector2 systemCursorPosition = Mouse.current.position.ReadValue();
+        bool systemCursorInsideWindow = IsCursorInsideWindow(systemCursorPosition);
+
+        if (!_HasCursorPosition)
+        {
+            Vector2 startingPosition = systemCursorPosition;
+            if (startingPosition == Vector2.zero && Screen.width > 0 && Screen.height > 0)
+                startingPosition = new Vector2(Screen.width * 0.5f, Screen.height * 0.5f);
+
+            _CursorPosition = startingPosition;
+            _HasCursorPosition = true;
+            _FlickCenter = _CursorPosition;
+            _HasFlickCenter = true;
+            _FlickVelocityTracker.Reset();
+        }
+        else if (_SystemCursorWasOutsideWindow && systemCursorInsideWindow)
+        {
+            SetCursorPosition(systemCursorPosition);
+            _SystemCursorWasOutsideWindow = false;
+        }
+        else
+        {
+            _CursorPosition += Mouse.current.delta.ReadValue();
+        }
+
+        if (!systemCursorInsideWindow)
+            _SystemCursorWasOutsideWindow = true;
+
+        if (_CursorPosition.x < 0f) _CursorPosition.x = 0f;
+        if (_CursorPosition.y < 0f) _CursorPosition.y = 0f;
+        if (Screen.width > 0 && _CursorPosition.x > Screen.width) _CursorPosition.x = Screen.width;
+        if (Screen.height > 0 && _CursorPosition.y > Screen.height) _CursorPosition.y = Screen.height;
+
+        SyncCursorVisual();
+    }
+
+    private void SetCursorPosition(Vector2 position)
+    {
+        _CursorPosition = position;
+        _HasCursorPosition = true;
+        _FlickCenter = position;
+        _HasFlickCenter = true;
+        _FlickVelocityTracker.Reset();
+        _CursorMotionSuppressionFrames = 1;
+        if (Mouse.current != null)
+            InputState.Change(Mouse.current.position, position);
+        SyncCursorVisual();
+    }
+
+    private void SyncCursorVisual()
+    {
+        if (Cursor == null) return;
+        Cursor.transform.position = _CursorPosition;
+    }
+
+    private static bool IsCursorInsideWindow(Vector2 position) =>
+        position.x >= 0f &&
+        position.y >= 0f &&
+        (Screen.width <= 0 || position.x <= Screen.width) &&
+        (Screen.height <= 0 || position.y <= Screen.height);
+
+    private void UpdateCursorLockState()
+    {
+        CursorLockMode targetLockState = ShouldLockCursor() ? CursorLockMode.Locked : CursorLockMode.None;
+
+        if (UnityEngine.Cursor.lockState != targetLockState)
+            UnityEngine.Cursor.lockState = targetLockState;
+    }
+
+    private bool ShouldLockCursor()
+    {
+        if (InputManager == null)
+            return false;
+
+        if (InputManager.HoldQueue.Count > 0)
+            return true;
+
+        if (_Flicked || _IsGesturing)
+            return true;
+
+        for (int i = 0; i < InputManager.HitQueue.Count; i++)
+        {
+            HitPlayer hitObject = InputManager.HitQueue[i];
+            if (!hitObject || hitObject.IsProcessed || !hitObject.Current.Flickable)
+                continue;
+
+            if (Math.Abs(hitObject.Time - Player.CurrentTime) <= Player.PassWindow * 2)
+                return HasHeldKey();
+        }
+
+        return false;
+    }
+
+    private void UpdateFlickState()
+    {
+        if (Mouse.current == null)
+            return;
+
+        if (!_HasFlickCenter)
+        {
+            _FlickCenter = _CursorPosition;
+            _HasFlickCenter = true;
+        }
+
+        float screenDpi = Screen.dpi > 0 ? Screen.dpi : 100f;
+        float flickThreshold = GetFlickThreshold(screenDpi);
+        float velocityThreshold = GetFlickVelocityThreshold(screenDpi);
+
+        _FlickVelocityTracker.Push((float)Player.CurrentTime, _CursorPosition);
+        float velocityMagnitude = _FlickVelocityTracker.Speed().magnitude;
+        _IsGesturing = velocityMagnitude >= velocityThreshold;
+
+        if (!_Flicked)
+        {
+            bool flickableApproaching = false;
+            HitPlayer enteredNote = null;
+
+            for (int i = 0; i < InputManager.HitQueue.Count; i++)
+            {
+                HitPlayer hitObject = InputManager.HitQueue[i];
+                if (!hitObject || hitObject.IsProcessed || !hitObject.Current.Flickable)
+                    continue;
+
+                if (Math.Abs(hitObject.Time - Player.CurrentTime) <= Player.PassWindow * 2)
+                    flickableApproaching = true;
+
+                if (enteredNote == null &&
+                    Vector2.Distance(_CursorPosition, hitObject.HitCoord.Position) <= hitObject.HitCoord.Radius)
+                {
+                    enteredNote = hitObject;
+                }
+            }
+
+            if (flickableApproaching)
+            {
+                if (!_FlickCenterResetPending)
+                {
+                    _FlickCenterResetPending = true;
+                    _FlickCenterResetClock = 0;
+                }
+
+                if (enteredNote != null && _FlickCenterSnappedNote != enteredNote)
+                {
+                    _FlickCenter = _CursorPosition;
+                    _FlickCenterSnappedNote = enteredNote;
+                    _FlickCenterResetClock = 0;
+                }
+            }
+            else
+            {
+                _FlickCenterResetPending = false;
+                _FlickCenterResetClock += Time.deltaTime;
+
+                if (_FlickCenterResetClock >= 0.08f)
+                {
+                    _FlickCenter = _CursorPosition;
+                    _FlickCenterSnappedNote = null;
+                    _FlickCenterResetClock = 0;
+                }
+            }
+
+            float flickDistance = Vector2.Distance(_CursorPosition, _FlickCenter);
+            if (flickDistance >= flickThreshold / 2f)
+                _FlickDirection = -Vector2.SignedAngle(Vector2.up, _CursorPosition - _FlickCenter);
+
+            if (_IsGesturing && flickDistance >= flickThreshold)
+            {
+                _Flicked = true;
+                _FlickTime = Player.CurrentTime;
+            }
+        }
+
+        if (_Flicked)
+        {
+            bool flickTimedOut = Math.Abs(Player.CurrentTime - _FlickTime) > Player.PerfectWindow;
+            bool nearAnyFlickable = false;
+
+            for (int i = 0; i < InputManager.HitQueue.Count; i++)
+            {
+                HitPlayer hitObject = InputManager.HitQueue[i];
+                if (!hitObject || hitObject.IsProcessed || !hitObject.Current.Flickable)
+                    continue;
+
+                if (Math.Abs(hitObject.Time - Player.CurrentTime) <= Player.PassWindow)
+                {
+                    nearAnyFlickable = true;
+                    break;
+                }
+            }
+
+            if (flickTimedOut && nearAnyFlickable)
+                ClearFlickState();
+        }
+    }
+
+    private bool TapFlickVerifier(HitPlayer hitObject, Vector2 tapStartPos, float tapStartDist, float flickThreshold)
+    {
+        bool positionValid;
+        if (float.IsFinite(hitObject.Current.FlickDirection))
+        {
+            float corridorDist = Mathf.Abs(
+                (Quaternion.Euler(0, 0, hitObject.Current.FlickDirection) *
+                 (tapStartPos - hitObject.HitCoord.Position)).x);
+
+            positionValid = corridorDist < hitObject.HitCoord.Radius + flickThreshold;
+        }
+        else
+        {
+            positionValid = tapStartDist < hitObject.HitCoord.Radius;
+        }
+
+        if (!positionValid)
+            return false;
+
+        return FlickVerifier(hitObject, flickThreshold, _FlickDirection);
+    }
+
+    private bool FlickVerifier(HitPlayer hitObject, float flickThreshold, float? angle = null)
+    {
+        if (!float.IsNaN(hitObject.Current.FlickDirection))
+        {
+            if (hitObject.Current.Type == HitObject.HitType.Normal && !_Flicked)
+                return true;
+
+            float calculatedAngle = angle ?? _FlickDirection;
+            return ValidateFlickDirection(hitObject.Current.FlickDirection, calculatedAngle);
+        }
+
+        return hitObject.Current.Type == HitObject.HitType.Normal || _IsGesturing;
+    }
+
+    private static bool ValidateFlickDirection(float expected, float actual)
+    {
+        float absDiff = Mathf.Abs(Mathf.DeltaAngle(expected, actual));
+        return absDiff <= 25f || absDiff <= 27.5f;
+    }
+
+    private static float GetFlickThreshold(float screenDpi)
+    {
+        float minDimension = Mathf.Max(1f, Mathf.Min(Screen.width, Screen.height));
+        float dpiThreshold = screenDpi * 0.2f;
+        float windowThreshold = minDimension * 0.04f;
+
+        return Mathf.Max(dpiThreshold, windowThreshold);
+    }
+
+    private static float GetFlickVelocityThreshold(float screenDpi)
+    {
+        float minDimension = Mathf.Max(1f, Mathf.Min(Screen.width, Screen.height));
+        float sizeFactor = Mathf.Clamp(1080f / minDimension, 1f, 2.5f);
+
+        return 1.8f * (screenDpi / 275f) * screenDpi * sizeFactor;
+    }
+
+    private void ClearFlickState()
+    {
+        _Flicked = false;
+        _FlickTime = double.NegativeInfinity;
+        _FlickDirection = float.NaN;
+        _IsGesturing = false;
+        _FlickCenter = _CursorPosition;
+        _FlickCenterSnappedNote = null;
+        _FlickCenterResetPending = false;
+        _FlickCenterResetClock = 0;
+        _FlickVelocityTracker.Reset();
     }
 
     private bool HasHeldKey()
@@ -398,6 +819,63 @@ public class PCInputManager : MonoBehaviour
     private static bool IsCatchHead(HitPlayer hitObject) =>
         hitObject.Current.Type == HitObject.HitType.Catch &&
         !hitObject.Current.Flickable;
+
+    private sealed class CursorVelocityTracker
+    {
+        private const int RecordMax = 10;
+        private readonly Queue<(float time, Vector2 position)> _Movements = new(RecordMax);
+
+        public void Push(float time, Vector2 position)
+        {
+            if (_Movements.Count == RecordMax)
+                _Movements.Dequeue();
+
+            _Movements.Enqueue((time, position));
+        }
+
+        public void Reset() => _Movements.Clear();
+
+        public Vector2 Speed()
+        {
+            if (_Movements.Count < 2)
+                return Vector2.zero;
+
+            float samples = _Movements.Count;
+            float list = _Movements.Peek().time;
+
+            float sumX = 0f, sumX2 = 0f, sumX3 = 0f, sumX4 = 0f;
+            Vector2 sumY = Vector2.zero, sumXY = Vector2.zero, sumX2Y = Vector2.zero;
+
+            foreach ((float time, Vector2 position) in _Movements)
+            {
+                float x = time - list;
+                sumY += position;
+                sumX += x;
+                sumXY += x * position;
+
+                float x2 = x * x;
+                sumX2 += x2;
+                sumX2Y += x2 * position;
+
+                float x3 = x2 * x;
+                sumX3 += x3;
+                sumX4 += x3 * x;
+            }
+
+            float correctedX = sumX2 - sumX * sumX / samples;
+            float correctedCrossProduct = sumX3 - sumX * sumX2 / samples;
+            float correctedXSquared = sumX4 - sumX2 * sumX2 / samples;
+            float determinant = correctedX * correctedXSquared - correctedCrossProduct * correctedCrossProduct;
+
+            if (Mathf.Approximately(determinant, 0f))
+                return Vector2.zero;
+
+            Vector2 correctedCrossXY = sumXY - sumY * (sumX / samples);
+            Vector2 correctedCrossX2Y = sumX2Y - sumY * (sumX2 / samples);
+
+            return (correctedCrossXY * correctedXSquared - correctedCrossX2Y * correctedCrossProduct) / determinant;
+        }
+    }
 }
 
 public class PCKeyState
@@ -406,5 +884,6 @@ public class PCKeyState
     public bool Initial;
     public bool Released;
     public double PressTime;
+    public Vector2 PressPosition;
     public HitPlayer QueuedHit;
 }

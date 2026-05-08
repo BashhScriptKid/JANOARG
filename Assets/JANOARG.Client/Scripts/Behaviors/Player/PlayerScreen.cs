@@ -826,6 +826,7 @@ namespace JANOARG.Client.Behaviors.Player
             if (((HitsRemaining <= 0 && PlayerInputManager.sInstance.HoldQueue.Count == 0) || Lanes.Count == 0 || (float)CurrentTime / Music.clip.length >= 1) && !ResultExec)
             {
                 ComputeAndSaveMedianOffset();
+                PCInputManager.sInstance?.EndCursorControl();
                 PlayerScreenResult.sMain.StartEndingAnim();
                 ResultExec = true;
             }
