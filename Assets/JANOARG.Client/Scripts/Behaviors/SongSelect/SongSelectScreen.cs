@@ -559,7 +559,7 @@ namespace JANOARG.Client.Behaviors.SongSelect
         public void SetTargetSong([CanBeNull] string songID, [CanBeNull] PlayableSong targetSong)
         {
 
-            Debug.Log("Setting target song to " + songID + ", " + targetSong.SongName);
+            Debug.Log("Setting target song to " + (targetSong != null ? $"{songID}, {targetSong.SongName}" : "UNDEFINED"));
 
             if (songID == null || targetSong == null)
             {
