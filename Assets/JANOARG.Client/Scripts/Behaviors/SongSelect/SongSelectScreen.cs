@@ -25,6 +25,7 @@ using UnityEngine.Assertions;
 using System.Linq;
 using JANOARG.Client.Behaviors.SongSelect.Map.MapProps;
 using JANOARG.Shared.Utils.Animation;
+using JetBrains.Annotations;
 
 namespace JANOARG.Client.Behaviors.SongSelect
 {
@@ -555,9 +556,23 @@ namespace JANOARG.Client.Behaviors.SongSelect
             TargetSongAnim = null;
         }
 
-        public void SetTargetSong(string songID, PlayableSong targetSong)
+        public void SetTargetSong([CanBeNull] string songID, [CanBeNull] PlayableSong targetSong)
         {
+
             Debug.Log("Setting target song to " + songID + ", " + targetSong.SongName);
+
+            if (songID == null || targetSong == null)
+            {
+                TargetSongID = null;
+                TargetSong = null;
+                TargetSongInfoName.text = "";
+                TargetSongInfoArtist.text = "";
+                TargetSongInfoInfo.text = "";
+                TargetSongLockedIndicator.SetActive(false);
+                CurrentPreviewClip = null;
+                LaunchButton.gameObject.SetActive(false);
+                return;
+            }
 
             TargetSongID = songID;
             TargetSong = targetSong;
@@ -589,7 +604,7 @@ namespace JANOARG.Client.Behaviors.SongSelect
             {
                 UnlockConditionText.text = GameConditional.GetDisplayInstructionString(PlaylistSongByID[songID].UnlockConditions);
             }
-
+            
             CurrentPreviewClip = IsTargetSongUnlocked ? targetSong.Clip : PreviewNoiseClip;
             CurrentPreviewRange = IsTargetSongUnlocked ? targetSong.PreviewRange : new(0, 10);
 
@@ -617,16 +632,30 @@ namespace JANOARG.Client.Behaviors.SongSelect
         public IEnumerator ListTargetSongShowAnim()
         {
             ListView.TargetSongOffset = ListView.TargetScrollOffset;
-            SongSelectListSongUI targetSong = ListView.SongItems.Find(item => ListView.TargetScrollOffset == item.Target?.Position);
-            ListView.TargetSongID = targetSong.Target.SongID;
-            if (targetSong)
+            SongSelectListSongUI targetSong = null;
+            if (ListView.SongItems.Count > 0)
+                targetSong = ListView.SongItems.Find(item => item.Target != null && Mathf.Approximately(ListView.TargetScrollOffset, item.Target.Position));
+            
+            if (!targetSong)
             {
-                SetTargetSong(targetSong.Target.SongID, targetSong.TargetSong);
-                StartCoroutine(SongBurstAnim(targetSong.CoverImage.rectTransform));
-                yield return SetCover(targetSong.Target.SongID, targetSong.TargetSong);
-                UpdateButtons();
+                if (ListView.SongItems.Count > 0)
+                {
+                    targetSong = ListView.SongItems[0];
+                }
+                else
+                {
+                    ListView.TargetSongID = null;
+                    TargetSong = null;
+                    TargetSongID = null;
+                    yield break;
+                }
             }
-
+            ListView.TargetSongID = targetSong.Target.SongID;
+            SetTargetSong(targetSong.Target.SongID, targetSong.TargetSong);
+            StartCoroutine(SongBurstAnim(targetSong.CoverImage.rectTransform));
+            yield return SetCover(targetSong.Target.SongID, targetSong.TargetSong);
+            UpdateButtons();
+            
             LerpInfo(0);
             LerpDifficulty(0);
             LerpUnlockConditions(0);
