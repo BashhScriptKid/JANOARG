@@ -193,7 +193,7 @@ namespace JANOARG.Client.Behaviors.Player
             // rather than waiting for exact equality, which can hang indefinitely.
             const float END_TOLERANCE = 0.1f;
             yield return new WaitWhile(() =>
-                PlayerScreen.sMain.CurrentTime < PlayerScreen.sMain.Music.clip.length - END_TOLERANCE
+                PlayerScreen.sMain.PlaybackTime < PlayerScreen.sMain.Music.clip.length - END_TOLERANCE
                 && PlayerScreen.sMain.Music.isPlaying);
 
             // Stop playback so the audio lifecycle in PlayerScreen.Update doesn't restart the song

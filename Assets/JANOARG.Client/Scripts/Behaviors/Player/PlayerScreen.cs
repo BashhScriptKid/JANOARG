@@ -140,8 +140,20 @@ namespace JANOARG.Client.Behaviors.Player
         [FormerlySerializedAs("HasPlayedBefore")]
         public bool AlreadyInitialised;
 
-        // Double precision to avoid float drift on long songs
+        // Where the chart clock starts on load, i.e. how long the lead-in runs before the song proper.
+        // The single source for that number — both the clock and the audio schedule derive from it, so
+        // they cannot disagree about when chart time zero is.
+        public double ChartOrigin = -5;
+
+        // Double precision to avoid float drift on long songs.
+        // Chart time: playback position plus the player's AudioOffset. Everything that judges or draws a
+        // note is timed against this.
         public double CurrentTime = -5;
+
+        // Raw position within the clip, with no offset applied. Song progress, end-of-song detection and
+        // any seek of the audio source belong here — a player's calibration preference has no business in
+        // the arithmetic that decides how far through the song we are.
+        public double PlaybackTime = -5;
 
         [Space]
         public float TotalExScore = 0;
@@ -191,7 +203,20 @@ namespace JANOARG.Client.Behaviors.Player
 
         private double _LastDSPTime;
         private double _MusicStartDSP;  // DSP time at which Music.PlayScheduled was called
-        private const double _SPIKE_THRESHOLD = 0.1; // 100ms — above this, treat as a spike
+
+        // DSP time at which the currently scheduled playback is due to finish. NaN when nothing is
+        // scheduled. Lets the audio lifecycle tell "the source dropped out" apart from "the source
+        // finished" exactly, instead of guessing from how close the clock looks to the end of the clip.
+        private double _SongEndDSP = double.NaN;
+
+        // DSP time at which chart time zero falls. Set once when the run starts and deliberately not
+        // moved by a mid-song restart — the lead-in hangs off this single anchor instead of summing
+        // per-frame deltas, so it reaches zero exactly when the audio does.
+        private double _SongStartDSP = double.NaN;
+
+        // Latched once playback has legitimately finished, so no amount of device-specific audio timing
+        // can re-arm the restart path afterwards.
+        private bool _SongEnded;
 
         // Frame skipping: skip visual update when logic ran less than this ago
         private const float _FRAME_SKIP_THRESHOLD = 1f / 15f; // skip visual if >15 fps worth of logic work done
@@ -472,7 +497,11 @@ namespace JANOARG.Client.Behaviors.Player
 
             Music.clip = sTargetSong.Clip;
             Music.volume = Settings.BackgroundMusicVolume;
-            CurrentTime = -5;
+            CurrentTime = ChartOrigin;
+            PlaybackTime = ChartOrigin - Settings.AudioOffset;
+            _SongEnded = false;
+            _SongEndDSP = double.NaN;
+            _SongStartDSP = double.NaN;
             PlayerScreenPause.sMain.PauseTime = -10;
             IsReady = true;
             AlreadyInitialised = true;
@@ -862,12 +891,38 @@ namespace JANOARG.Client.Behaviors.Player
 
             IsPlaying = true;
 
-            // Idk why but songs are starting 3/4 of a second later than they's supposed to be 
+            // Idk why but songs are starting 3/4 of a second later than they's supposed to be
             // so this will be here as a temporary hack before I figure out what is going on
-            _MusicStartDSP = AudioSettings.dspTime + Math.Max(CurrentTime - 0.75, 0);
-            Music.time = 0;
-            Music.PlayScheduled(_MusicStartDSP);
+            // Lead-in runs for as long as the origin says, less the 0.75 fudge that is currently load
+            // bearing. Derived from CurrentTime rather than a literal so the countdown, the chart clock
+            // and the audio schedule all trace back to the same origin.
+            _SongStartDSP = AudioSettings.dspTime + Math.Max(-CurrentTime - 0.75, 0);
+            ScheduleMusic(_SongStartDSP, 0);
             _LastDSPTime = AudioSettings.dspTime;
+        }
+
+        /// <summary>
+        ///     Drops the scheduled end. DSP time keeps running while the game is paused, so a stale
+        ///     schedule would read as "the song already finished" on resume and block the restart that
+        ///     resuming depends on.
+        /// </summary>
+        public void SuspendMusicSchedule()
+        {
+            _SongEndDSP = double.NaN;
+        }
+
+        /// <summary>
+        ///     Every route into playback goes through here so <see cref="_SongEndDSP" /> can never drift out
+        ///     of sync with what the audio source is actually doing.
+        /// </summary>
+        /// <param name="dspStart">DSP time at which playback should begin.</param>
+        /// <param name="seekPosition">Raw position within the clip to start from. No offset applied.</param>
+        public void ScheduleMusic(double dspStart, double seekPosition)
+        {
+            _MusicStartDSP = dspStart;
+            Music.time = (float)seekPosition;
+            Music.PlayScheduled(dspStart);
+            _SongEndDSP = dspStart + (Music.clip.length - seekPosition);
         }
 
         public bool ResultExec = false;
@@ -890,38 +945,41 @@ namespace JANOARG.Client.Behaviors.Player
             #endif
 
             double dspNow = AudioSettings.dspTime;
-            double rawDelta = dspNow - _LastDSPTime;
+
+            PlayerClockDecision clock = PlayerClock.Advance(new PlayerClockFrame
+            {
+                DspNow         = dspNow,
+                LastDspTime    = _LastDSPTime,
+                PrevChartTime  = CurrentTime,
+                FrameDelta     = Time.unscaledDeltaTime,
+                TimeSamples    = Music.timeSamples,
+                Frequency      = Music.clip.frequency,
+                IsPlaying      = Music.isPlaying,
+                ClipLength     = Music.clip.length,
+                AudioOffset    = Settings.AudioOffset,
+                SongStartDSP   = _SongStartDSP,
+                SongEndDSP     = _SongEndDSP,
+                SongEnded      = _SongEnded,
+                ResultExec     = ResultExec,
+                HitsRemaining  = HitsRemaining,
+                HoldQueueCount = PlayerInputManager.sInstance.HoldQueue.Count,
+                GoodWindow     = GoodWindow,
+            });
+
             _LastDSPTime = dspNow;
+            CurrentTime  = clock.ChartTime;
+            PlaybackTime = clock.PlaybackTime;
+            _SongEnded   = clock.SongEnded;
 
-            if (rawDelta > _SPIKE_THRESHOLD)
+            // Audio lifecycle — use PlayScheduled on restart to avoid buffer-boundary snap.
+            // Only fires for a source that stopped before its scheduled end; one that stopped because it
+            // finished is left alone, which is what keeps the song from looping back to the start.
+            if (clock.RestartAudio)
             {
-                // Lag spike — resync clock to audio without rushing the chart
-                if (Music.isPlaying)
-                    CurrentTime = (double)Music.timeSamples / Music.clip.frequency + Settings.AudioOffset;
-                // else: lead-in / post-song — just drop the frame, don't advance
+                const double RESTART_LEAD_TIME = 0.05;
+                ScheduleMusic(dspNow + RESTART_LEAD_TIME, clock.RestartSeekTime);
             }
-            else
-            {
-                if (Music.isPlaying && CurrentTime >= 0)
-                    // Audio is the source of truth during playback
-                    CurrentTime = (double)Music.timeSamples / Music.clip.frequency + Settings.AudioOffset;
-                else
-                    CurrentTime += rawDelta > 0 ? rawDelta : Time.unscaledDeltaTime;
-            }
-
-            // Audio lifecycle — use PlayScheduled on restart to avoid buffer-boundary snap
-            if (CurrentTime >= 0 && CurrentTime < Music.clip.length)
-            {
-                if (!Music.isPlaying && !ResultExec)
-                {
-                    const double RESTART_LEAD_TIME = 0.05;
-                    _MusicStartDSP = dspNow + RESTART_LEAD_TIME;
-                    Music.time = (float)(CurrentTime - Settings.AudioOffset);
-                    Music.PlayScheduled(_MusicStartDSP);
-                }
-                // No hard-seek sync corrector needed — audio IS the clock now
-            }
-            else if (Music.isPlaying)
+            else if (Music.isPlaying && (_SongEnded || PlaybackTime >= Music.clip.length))
                 Music.Pause();
 
             // Process input directly — no coroutine, no +1 frame latency
@@ -929,11 +987,15 @@ namespace JANOARG.Client.Behaviors.Player
             PlayerInputManager.sInstance.UpdateInput();
             sr_UpdateInputCall.End();
 
-            bool clauseHitsExhausted = HitsRemaining <= 0 && PlayerInputManager.sInstance.HoldQueue.Count == 0;
-            bool clauseSongOver = (float)CurrentTime / Music.clip.length >= 1;
-            bool grace = (float)CurrentTime > 1; // 1s grace period in case of race condition
-
-            if ((clauseHitsExhausted || clauseSongOver) && grace && !ResultExec)
+            // Re-asked after input, since that is what settles this frame's hit counts.
+            if (PlayerClock.ShouldTriggerResult(
+                    PlaybackTime,
+                    Music.clip.length,
+                    GoodWindow,
+                    _SongEnded,
+                    HitsRemaining,
+                    PlayerInputManager.sInstance.HoldQueue.Count,
+                    ResultExec))
             {
                 ComputeAndSaveMedianOffset();
                 PlayerScreenResult.sMain.StartEndingAnim();
@@ -950,7 +1012,7 @@ namespace JANOARG.Client.Behaviors.Player
             if (EditorApplication.isPaused) return;
 #endif
 
-            SongProgress.value = (float)(CurrentTime / Music.clip.length);
+            SongProgress.value = (float)(PlaybackTime / Music.clip.length);
 
             float visualTime = (float)CurrentTime + Settings.VisualOffset;
             float visualBeat = sTargetSong.Timing.ToBeat(visualTime);
@@ -1056,7 +1118,16 @@ namespace JANOARG.Client.Behaviors.Player
 
             // Only anchor from timeSamples when music is actively playing.
             if (Music.isPlaying && CurrentTime >= 0)
-                CurrentTime = (double)Music.timeSamples / Music.clip.frequency + Settings.AudioOffset;
+            {
+                PlaybackTime = (double)Music.timeSamples / Music.clip.frequency;
+                CurrentTime  = PlaybackTime + Settings.AudioOffset;
+            }
+            else
+            {
+                // Paused or in lead-in: no samples to trust, so keep the raw position consistent with
+                // whatever chart time was set to (PlayerScreenPause rolls it back by 1.5s on resume).
+                PlaybackTime = CurrentTime - Settings.AudioOffset;
+            }
         }
 
         // Call on pause or result entry — deferred so per-hit cost is just a list append.
