@@ -64,6 +64,25 @@ namespace JANOARG.Client.Behaviors.Player
 
         /// <summary>The widest judgment window, i.e. how long a note stays resolvable after its time.</summary>
         public double GoodWindow;
+
+        /// <summary>
+        ///     AudioSource.timeSamples as of last frame. Only used to tell "the audio clock delivered a new
+        ///     reading" from "we are looking at the same reading again", which is what the visual clock
+        ///     interpolates across.
+        /// </summary>
+        public int PrevTimeSamples;
+
+        /// <summary>
+        ///     The visual clock's value as of last frame, or NaN when there is no history to extrapolate
+        ///     from (first frame, after a seek, after a resync) — in which case it simply snaps.
+        /// </summary>
+        public double PrevVisualTime;
+
+        /// <summary>
+        ///     How far the audio clock jumped the last time it actually moved, in seconds — the device's
+        ///     mixer buffer, measured rather than assumed. Bounds how far the visual clock may run ahead.
+        /// </summary>
+        public double LastSampleStep;
     }
 
     public struct PlayerClockDecision
@@ -85,6 +104,29 @@ namespace JANOARG.Client.Behaviors.Player
 
         /// <summary>Hand off to the result screen.</summary>
         public bool TriggerResult;
+
+        /// <summary>
+        ///     Chart time for <em>drawing only</em>, smoothed across the audio clock's update granularity.
+        ///     <para>
+        ///         AudioSource.timeSamples and AudioSettings.dspTime both advance once per mixer callback,
+        ///         not once per frame. On a device whose negotiated buffer is large — Android, where both
+        ///         the sample rate and the buffer are picked by the device — several consecutive frames
+        ///         read the same position, so a chart drawn against <see cref="ChartTime" /> renders the
+        ///         same pose repeatedly and appears to run at a fraction of the real frame rate while the
+        ///         UI, which is driven by Time.deltaTime, stays smooth.
+        ///     </para>
+        ///     <para>
+        ///         Deliberately kept out of <see cref="ChartTime" />: judgment stays sample-exact, so hit
+        ///         windows and the recorded median offset behave identically on every device, fixed or not.
+        ///     </para>
+        /// </summary>
+        public double VisualTime;
+
+        /// <summary>
+        ///     The current estimate of the audio clock's step. Carry back into the next frame's
+        ///     <see cref="PlayerClockFrame.LastSampleStep" />.
+        /// </summary>
+        public double SampleStep;
     }
 
     public static class PlayerClock
@@ -99,6 +141,51 @@ namespace JANOARG.Client.Behaviors.Player
         ///     teleport the run back to the start of the song.
         /// </summary>
         public const double MaxBackwardJump = 0.25;
+
+        /// <summary>
+        ///     Hard ceiling on how far the visual clock may run ahead of the audio clock, whatever the
+        ///     measured step says. A device reporting an implausible jump cannot turn the visual clock into
+        ///     a free-runner that drifts away from the music.
+        /// </summary>
+        public const double MaxVisualLead = 0.1;
+
+        /// <summary>Step assumed before the audio clock has been observed moving even once.</summary>
+        public const double DefaultVisualLead = 1.0 / 60;
+
+        /// <summary>
+        ///     Keeps a running estimate of the audio clock's granularity. Rejects non-positive steps (the
+        ///     clock did not move) and implausibly large ones (a seek or a restart, not a buffer), falling
+        ///     back to the previous estimate so a single odd frame cannot widen the extrapolation cap.
+        /// </summary>
+        static double MeasureStep(double observed, double previous, bool moved)
+        {
+            if (!moved || !(observed > 0) || observed > MaxVisualLead)
+                return previous > 0 ? previous : DefaultVisualLead;
+
+            return observed;
+        }
+
+        /// <summary>
+        ///     Advances the draw clock by real elapsed time while the audio clock sits still, and snaps back
+        ///     to it the moment it delivers a new reading.
+        /// </summary>
+        /// <remarks>
+        ///     The snap is never a visible jump backwards. Extrapolation is capped at one measured step past
+        ///     the current audio reading, and a new reading advances the audio clock by exactly that step —
+        ///     so the value we snap to is always at or ahead of where extrapolation had reached. That is the
+        ///     whole reason the step is measured per-device instead of assumed.
+        /// </remarks>
+        static double Interpolate(double authoritative, double prevVisual, double frameDelta, bool moved, double step)
+        {
+            if (double.IsNaN(prevVisual) || moved)
+                return authoritative;
+
+            double lead = step < MaxVisualLead ? step : MaxVisualLead;
+            double next = prevVisual + (frameDelta > 0 ? frameDelta : 0);
+            double cap  = authoritative + lead;
+
+            return next > cap ? cap : next;
+        }
 
         public static PlayerClockDecision Advance(in PlayerClockFrame f)
         {
@@ -118,15 +205,29 @@ namespace JANOARG.Client.Behaviors.Player
             bool leadIn = !double.IsNaN(f.SongStartDSP) && f.DspNow < f.SongStartDSP;
 
             if (leadIn)
+            {
+                double leadPlayback = f.DspNow - f.SongStartDSP;
+                double leadChart    = leadPlayback + f.AudioOffset;
+
+                // dspTime is quantised to the mixer buffer exactly as timeSamples is, so the lead-in
+                // staircases on the same devices for the same reason and gets the same treatment —
+                // otherwise the countdown and intro visuals stutter and then smooth out once the song
+                // starts, which reads as a worse bug than the one being fixed.
+                bool   dspMoved = f.DspNow > f.LastDspTime;
+                double leadStep = MeasureStep(rawDelta, f.LastSampleStep, dspMoved);
+
                 return new PlayerClockDecision
                 {
-                    PlaybackTime    = f.DspNow - f.SongStartDSP,
-                    ChartTime       = f.DspNow - f.SongStartDSP + f.AudioOffset,
+                    PlaybackTime    = leadPlayback,
+                    ChartTime       = leadChart,
+                    VisualTime      = Interpolate(leadChart, f.PrevVisualTime, f.FrameDelta, dspMoved, leadStep),
+                    SampleStep      = leadStep,
                     RestartAudio    = false,
                     RestartSeekTime = 0,
                     SongEnded       = ended,
                     TriggerResult   = false,
                 };
+            }
 
             double sampleTime   = f.Frequency > 0 ? (double)f.TimeSamples / f.Frequency : 0;
             bool   sampleUsable = f.IsPlaying && f.PrevChartTime >= 0 && f.Frequency > 0;
@@ -157,10 +258,19 @@ namespace JANOARG.Client.Behaviors.Player
                            && newPlayback >= 0
                            && newPlayback < f.ClipLength;
 
+            double chartTime = newPlayback + f.AudioOffset;
+
+            // What counts as "the clock moved" depends on which source we actually used above: the sample
+            // position when audio is trustworthy, the DSP delta when we are free-running without it.
+            bool   clockMoved = sampleUsable ? f.TimeSamples != f.PrevTimeSamples : rawDelta > 0;
+            double step       = MeasureStep(chartTime - f.PrevChartTime, f.LastSampleStep, clockMoved);
+
             return new PlayerClockDecision
             {
                 PlaybackTime    = newPlayback,
-                ChartTime       = newPlayback + f.AudioOffset,
+                ChartTime       = chartTime,
+                VisualTime      = Interpolate(chartTime, f.PrevVisualTime, f.FrameDelta, clockMoved, step),
+                SampleStep      = step,
                 RestartAudio    = restart,
                 RestartSeekTime = newPlayback,
                 SongEnded       = ended,

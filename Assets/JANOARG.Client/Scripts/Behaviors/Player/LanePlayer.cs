@@ -692,7 +692,7 @@ namespace JANOARG.Client.Behaviors.Player
                 }
             }
 
-            double time = Math.Max(PlayerScreen.sMain.CurrentTime + PlayerScreen.sMain.Settings.VisualOffset, hit.Time);
+            double time = Math.Max(PlayerScreen.sMain.VisualTime + PlayerScreen.sMain.Settings.VisualOffset, hit.Time);
 
             int index = -1;
             for (int i = 0; i < TimeStamps.Count; i++)

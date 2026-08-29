@@ -218,6 +218,25 @@ namespace JANOARG.Client.Behaviors.Player
         // can re-arm the restart path afterwards.
         private bool _SongEnded;
 
+        // Draw clock. Chart time smoothed across the audio clock's update granularity — see
+        // PlayerClockDecision.VisualTime. NaN means "no history, snap on the next frame", which is the
+        // correct state at startup and after any seek or resync.
+        private double _VisualTime = double.NaN;
+        private double _LastSampleStep;
+        private int    _PrevTimeSamples;
+
+        /// <summary>
+        ///     Chart time for drawing. Anything that positions or shapes a visual reads this; anything that
+        ///     judges reads <see cref="CurrentTime" />. Falls back to CurrentTime until the first
+        ///     interpolated frame exists.
+        /// </summary>
+        /// <remarks>
+        ///     Reading CurrentTime from draw code is the bug this exists to prevent: it only advances when
+        ///     the audio clock does, so on a device with a large mixer buffer that element staircases while
+        ///     everything around it moves smoothly — which looks worse than the uniform stutter it replaced.
+        /// </remarks>
+        public double VisualTime => double.IsNaN(_VisualTime) ? CurrentTime : _VisualTime;
+
         // Frame skipping: skip visual update when logic ran less than this ago
         private const float _FRAME_SKIP_THRESHOLD = 1f / 15f; // skip visual if >15 fps worth of logic work done
         private float _LastVisualTime = float.NegativeInfinity;
@@ -502,6 +521,9 @@ namespace JANOARG.Client.Behaviors.Player
             _SongEnded = false;
             _SongEndDSP = double.NaN;
             _SongStartDSP = double.NaN;
+            _VisualTime = double.NaN;
+            _LastSampleStep = 0;
+            _PrevTimeSamples = 0;
             PlayerScreenPause.sMain.PauseTime = -10;
             IsReady = true;
             AlreadyInitialised = true;
@@ -946,13 +968,17 @@ namespace JANOARG.Client.Behaviors.Player
 
             double dspNow = AudioSettings.dspTime;
 
+            // Read once and reuse: sampling it twice could straddle a mixer callback and make the frame
+            // disagree with itself about whether the audio clock moved.
+            int timeSamples = Music.timeSamples;
+
             PlayerClockDecision clock = PlayerClock.Advance(new PlayerClockFrame
             {
                 DspNow         = dspNow,
                 LastDspTime    = _LastDSPTime,
                 PrevChartTime  = CurrentTime,
                 FrameDelta     = Time.unscaledDeltaTime,
-                TimeSamples    = Music.timeSamples,
+                TimeSamples    = timeSamples,
                 Frequency      = Music.clip.frequency,
                 IsPlaying      = Music.isPlaying,
                 ClipLength     = Music.clip.length,
@@ -964,12 +990,20 @@ namespace JANOARG.Client.Behaviors.Player
                 HitsRemaining  = HitsRemaining,
                 HoldQueueCount = PlayerInputManager.sInstance.HoldQueue.Count,
                 GoodWindow     = GoodWindow,
+
+                PrevTimeSamples = _PrevTimeSamples,
+                PrevVisualTime  = _VisualTime,
+                LastSampleStep  = _LastSampleStep,
             });
 
             _LastDSPTime = dspNow;
             CurrentTime  = clock.ChartTime;
             PlaybackTime = clock.PlaybackTime;
             _SongEnded   = clock.SongEnded;
+
+            _VisualTime      = clock.VisualTime;
+            _LastSampleStep  = clock.SampleStep;
+            _PrevTimeSamples = timeSamples;
 
             // Audio lifecycle — use PlayScheduled on restart to avoid buffer-boundary snap.
             // Only fires for a source that stopped before its scheduled end; one that stopped because it
@@ -1014,7 +1048,9 @@ namespace JANOARG.Client.Behaviors.Player
 
             SongProgress.value = (float)(PlaybackTime / Music.clip.length);
 
-            float visualTime = (float)CurrentTime + Settings.VisualOffset;
+            // Drawn against the smoothed clock, not CurrentTime. Judgment still runs on CurrentTime over
+            // in Update(); this affects what is rendered and nothing else.
+            float visualTime = (float)VisualTime + Settings.VisualOffset;
             float visualBeat = sTargetSong.Timing.ToBeat(visualTime);
 
             sCurrentChart.Palette.Advance(visualBeat);
@@ -1115,6 +1151,12 @@ namespace JANOARG.Client.Behaviors.Player
         public void Resync()
         {
             _LastDSPTime = AudioSettings.dspTime;
+
+            // Drop the draw clock's history: it extrapolates forward from the previous frame, and after a
+            // seek that previous frame belongs to a different part of the song. NaN makes it snap to
+            // whatever the audio clock reports next instead of sliding there.
+            _VisualTime      = double.NaN;
+            _PrevTimeSamples = Music.timeSamples;
 
             // Only anchor from timeSamples when music is actively playing.
             if (Music.isPlaying && CurrentTime >= 0)

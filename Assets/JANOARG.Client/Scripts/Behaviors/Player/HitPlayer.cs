@@ -156,7 +156,7 @@ namespace JANOARG.Client.Behaviors.Player
 
         public void UpdateMesh()
         {
-            double time = Math.Max(Time, PlayerScreen.sMain.CurrentTime + PlayerScreen.sMain.Settings.VisualOffset);
+            double time = Math.Max(Time, PlayerScreen.sMain.VisualTime + PlayerScreen.sMain.Settings.VisualOffset);
             double zPosition;
 
             try
