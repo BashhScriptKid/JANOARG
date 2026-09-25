@@ -724,6 +724,98 @@ namespace JANOARG.Client.Behaviors.Player
             yield return new WaitForEndOfFrame();
         }
 
+        /// <summary>
+        ///     Seek-then-bake a single note's hitbox, the same way the original radius bake worked:
+        ///     put the math camera at the note's own beat, then build the box from the lane
+        ///     cross-section there.
+        /// </summary>
+        private void BakeHitBox(LanePlayer instancedLane, LaneGroupPlayer laneInGroup, HitObject laneHitobject)
+        {
+            // Camera at the note's own beat.
+            CameraController hitObjectCamera =
+                (CameraController)sTargetChart.Data.Camera.GetStoryboardableObject(laneHitobject.Offset);
+            Pseudocamera.transform.localPosition = hitObjectCamera.CameraPivot;
+            Pseudocamera.transform.localEulerAngles = hitObjectCamera.CameraRotation;
+            Pseudocamera.transform.Translate(Vector3.back * hitObjectCamera.PivotDistance);
+
+            HitObject data = (HitObject)laneHitobject.GetStoryboardableObject(laneHitobject.Offset);
+
+            instancedLane.HitBoxes.Add(
+                BuildHitBox(instancedLane.Original, laneInGroup, data, laneHitobject.Offset, sTargetSong.Timing,
+                    Pseudocamera, ScaledExtraRadius, ScaledMinimumRadius));
+        }
+
+        /// <summary>
+        ///     Builds a note's screen-space hit band from a lane cross-section.
+        /// </summary>
+        /// <remarks>
+        ///     <para>
+        ///         The cross-section is taken at <paramref name = "beat"/>, pushed through the
+        ///         lane-group chain without adding the scroll z, and the note's
+        ///         <c>Position→Position+Length</c> span projected. The lateral half-vector gets the
+        ///         extra radius as headroom; the medial axis is the projected lane z axis (the
+        ///         direction that scrolls with time).
+        ///     </para>
+        /// </remarks>
+        public static HitScreenBox BuildHitBox(
+            Lane sourceLane, LaneGroupPlayer laneInGroup, HitObject data, float beat,
+            Metronome timing, Camera camera, float extraRadius, float minimumRadius)
+        {
+            Lane lane = (Lane)sourceLane.GetStoryboardableObject(beat);
+            LanePosition positionStep = lane.GetLanePosition(beat, beat, timing);
+
+            Quaternion laneRot = Quaternion.Euler(lane.Rotation);
+            Vector3 startLocal = laneRot * positionStep.StartPosition + lane.Position;
+            Vector3 endLocal = laneRot * positionStep.EndPosition + lane.Position;
+            Vector3 medialLocal = laneRot * Vector3.forward;
+
+            // Apply the lane-group chain (root first).
+            var groupChain = new List<LaneGroupPlayer>();
+            LaneGroupPlayer g = laneInGroup;
+            while (g) { groupChain.Add(g); g = g.Parent; }
+            groupChain.Reverse();
+
+            foreach (LaneGroupPlayer grp in groupChain)
+            {
+                LaneGroup sampled = (LaneGroup)grp.Original.GetStoryboardableObject(beat);
+                Vector3 grpPosition = sampled.Position;
+                Quaternion grpRotation = Quaternion.Euler(sampled.Rotation);
+
+                startLocal = grpPosition + grpRotation * startLocal;
+                endLocal = grpPosition + grpRotation * endLocal;
+                medialLocal = grpRotation * medialLocal;
+            }
+
+            Vector3 p0 = Vector3.LerpUnclamped(startLocal, endLocal, data.Position);
+            Vector3 p1 = Vector3.LerpUnclamped(startLocal, endLocal, data.Position + data.Length);
+
+            Vector2 hitStart = camera.WorldToScreenPoint(p0);
+            Vector2 hitEnd = camera.WorldToScreenPoint(p1);
+
+            Vector2 center = (hitStart + hitEnd) / 2f;
+            Vector2 lateralHalf = (hitEnd - hitStart) / 2f;
+            float lateralLength = lateralHalf.magnitude;
+            Vector2 lateralAxis = lateralLength > 0.0001f ? lateralHalf / lateralLength : Vector2.right;
+
+            // Extra radius is lateral headroom only ("slightly wider than it seems"), with the same
+            // accessibility floor the original radius bake used.
+            float halfWidth = Mathf.Max(lateralLength + extraRadius, minimumRadius);
+            lateralHalf = lateralAxis * halfWidth;
+
+            Vector3 noteCenterWorld = (p0 + p1) / 2f;
+            Vector2 medialScreen = (Vector2)camera.WorldToScreenPoint(noteCenterWorld + medialLocal) - center;
+            Vector2 medialAxis = medialScreen.sqrMagnitude > 0.000001f
+                ? medialScreen.normalized
+                : new Vector2(-lateralAxis.y, lateralAxis.x);
+
+            return new HitScreenBox
+            {
+                Center = center,
+                LateralHalfVec = lateralHalf,
+                MedialAxis = medialAxis
+            };
+        }
+
         private IEnumerator LaneLoader()
         {
             int loadedLanes = 0;
@@ -813,46 +905,7 @@ namespace JANOARG.Client.Behaviors.Player
                                 TotalExScore += 1;
                         }
 
-                        // Set camera to hitobject's beat position
-                        CameraController hitObjectCamera = (CameraController)sTargetChart.Data.Camera.GetStoryboardableObject(laneHitobject.Offset);
-                        Pseudocamera.transform.localPosition = hitObjectCamera.CameraPivot;
-                        Pseudocamera.transform.localEulerAngles = hitObjectCamera.CameraRotation;
-                        Pseudocamera.transform.Translate(Vector3.back * hitObjectCamera.PivotDistance);
-
-                        // Get lane state at hitobject's beat
-                        Lane lane = (Lane)instancedLane.Original.GetStoryboardableObject(laneHitobject.Offset);
-                        LanePosition positionStep = lane.GetLanePosition(laneHitobject.Offset, laneHitobject.Offset, sTargetSong.Timing);
-
-                        Quaternion laneRot = Quaternion.Euler(lane.Rotation);
-                        Vector3 startLocal = laneRot * positionStep.StartPosition + lane.Position;
-                        Vector3 endLocal   = laneRot * positionStep.EndPosition   + lane.Position;
-
-                        var groupChain = new List<LaneGroupPlayer>();
-                        LaneGroupPlayer g = laneInGroup;
-                        while (g) { groupChain.Add(g); g = g.Parent; }
-                        groupChain.Reverse();
-
-                        foreach (var grp in groupChain)
-                        {
-                            LaneGroup sampled = (LaneGroup)grp.Original.GetStoryboardableObject(laneHitobject.Offset);
-                            grp.transform.localPosition    = sampled.Position;
-                            grp.transform.localEulerAngles = sampled.Rotation;
-                        }
-
-                        Vector3 startPos = laneInGroup != null ? laneInGroup.transform.TransformPoint(startLocal) : startLocal;
-                        Vector3 endPos   = laneInGroup != null ? laneInGroup.transform.TransformPoint(endLocal)   : endLocal;
-
-                        HitObject hitObject = (HitObject)laneHitobject.GetStoryboardableObject(laneHitobject.Offset);
-                        Vector2 hitStart = Pseudocamera.WorldToScreenPoint(Vector3.LerpUnclamped(startPos, endPos, hitObject.Position));
-                        Vector2 hitEnd   = Pseudocamera.WorldToScreenPoint(Vector3.LerpUnclamped(startPos, endPos, hitObject.Position + laneHitobject.Length));
-
-                        float radius = Vector2.Distance(hitStart, hitEnd) / 2 + ScaledExtraRadius;
-
-                        instancedLane.HitCoords.Add(new HitScreenCoord
-                        {
-                            Position = (hitStart + hitEnd) / 2,
-                            Radius = Mathf.Max(radius, ScaledMinimumRadius)
-                        });
+                        BakeHitBox(instancedLane, laneInGroup, laneHitobject);
                     }
 
                     HitsRemaining += instancedLane.Original.Objects.Count;

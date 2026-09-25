@@ -39,6 +39,7 @@ namespace JANOARG.Client.Behaviors.Player
 
         public LanePlayer     Lane;
         public HitScreenCoord HitCoord;
+        public HitScreenBox   HitBox;
 
         public bool           IsSimultaneous;
         public MeshRenderer   SimultaneousHighlight;
@@ -172,6 +173,34 @@ namespace JANOARG.Client.Behaviors.Player
 
                 FlickMesh.transform.rotation = rotation * Quaternion.Euler(0, 0, angle);
             }
+        }
+
+        /// <summary>
+        ///     The note's depth along the lane at the draw clock. Lower is closer to the camera /
+        ///     judgement line, i.e. more "in front" — used to break hitbox overlaps.
+        /// </summary>
+        public double Frontness => CurrentPosition;
+
+        /// <summary>
+        ///     Band containment against the seek-then-baked <see cref = "HitBox"/>.
+        /// </summary>
+        /// <remarks>
+        ///     The band is the note's lateral half-vector swept along the medial (z/scroll) axis, so
+        ///     only the component perpendicular to <see cref = "HitScreenBox.MedialAxis"/> is
+        ///     measured; the along-scroll component never rejects a tap. <paramref name = "marginScale"/>
+        ///     grows the band around the note for osu!-style flick follow.
+        /// </remarks>
+        /// <param name = "screenPoint"> The screen-space point to test. </param>
+        /// <param name = "marginScale"> Grow the band around its centre. </param>
+        public bool IsScreenPointInHitBox(Vector2 screenPoint, float marginScale = 1f)
+        {
+            Vector2 medialAxis = HitBox.MedialAxis;
+            Vector2 perpendicular = new Vector2(-medialAxis.y, medialAxis.x);
+
+            float halfWidth = Mathf.Abs(Vector2.Dot(HitBox.LateralHalfVec, perpendicular));
+            float lateral = Mathf.Abs(Vector2.Dot(screenPoint - HitBox.Center, perpendicular));
+
+            return lateral <= halfWidth * marginScale;
         }
 
         public void UpdateMesh()

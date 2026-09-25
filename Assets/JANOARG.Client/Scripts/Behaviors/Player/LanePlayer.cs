@@ -32,7 +32,7 @@ namespace JANOARG.Client.Behaviors.Player
         public float       CurrentPosition;
 
         public List<HitPlayer>      HitObjects = new();
-        public List<HitScreenCoord> HitCoords  = new();
+        public List<HitScreenBox>   HitBoxes   = new();
 
         public bool LaneStepDirty = false;
         private Mesh          _Mesh;
@@ -529,7 +529,6 @@ namespace JANOARG.Client.Behaviors.Player
                     player.Time = _HitObjectTime;
                     player.EndTime = player.Current.HoldLength > 0 
                         ? PlayerScreen.sTargetSong.Timing.ToSeconds(hit.Offset + hit.HoldLength) : _HitObjectTime;
-                    player.HitCoord = HitCoords[0];
 
                     // Always clear first: a reused (pooled) instance may carry ticks from its previous note.
                     player.HoldTicks.Clear();
@@ -543,13 +542,25 @@ namespace JANOARG.Client.Behaviors.Player
                     player.Lane = this;
                     HitObjects.Add(player);
 
+                    // Hand over the seek-then-baked hitbox (built in PlayerScreen's lane loader).
+                    // HitCoord keeps the baked centre so hit feedback spawns on the note.
+                    HitScreenBox bakedBox = HitBoxes[0];
+                    player.HitBox = bakedBox;
+                    player.HitCoord = new HitScreenCoord
+                    {
+                        Position = bakedBox.Center,
+                        Radius = Mathf.Max(
+                            bakedBox.LateralHalfVec.magnitude,
+                            PlayerScreen.sMain.ScaledMinimumRadius)
+                    };
+                    HitBoxes.RemoveAt(0);
+
                     // Init first: AddToQueue marks the note pending for autoplay, and Init is what
                     // resets that flag for a reused pooled instance.
                     player.Init();
                     PlayerInputEngine.sInstance.AddToQueue(player);
 
                     Current.Objects.RemoveAt(0);
-                    HitCoords.RemoveAt(0);
                     _HitObjectTime = float.NaN;
                     _HitObjectOffset++;
                 }
@@ -894,5 +905,31 @@ namespace JANOARG.Client.Behaviors.Player
     {
         public Vector2 Position;
         public float   Radius;
+    }
+
+    /// <summary>
+    ///     A note's baked, screen-space hitbox: a band centred on the note.
+    /// </summary>
+    /// <remarks>
+    ///     <para>
+    ///         <see cref = "LateralHalfVec"/> is the note's half-span along its own start→end
+    ///         (the cross-section, including the extra lateral headroom), as a screen vector from
+    ///         the centre. <see cref = "MedialAxis"/> is the projected z axis — the direction the
+    ///         lane scrolls with time. The band is the lateral span swept along the medial axis
+    ///         (up toward the visual lane and down as extrapolation), so containment only measures
+    ///         the component perpendicular to <see cref = "MedialAxis"/>.
+    ///     </para>
+    ///     <para>
+    ///         <see cref = "Center"/> is the note's screen centre (at the judgement line) so hit
+    ///         feedback spawns on the note. Baked seek-then-bake at load, like the original radius
+    ///         bake, so it lines up with what is rendered when the note is judged.
+    ///     </para>
+    /// </remarks>
+    [System.Serializable]
+    public struct HitScreenBox
+    {
+        public Vector2 Center;
+        public Vector2 LateralHalfVec;
+        public Vector2 MedialAxis;
     }
 }
