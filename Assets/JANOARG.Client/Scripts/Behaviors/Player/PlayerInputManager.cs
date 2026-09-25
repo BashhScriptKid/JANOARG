@@ -1412,15 +1412,29 @@ public class PlayerInputManager : MonoBehaviour
         if (FlickTravel(touch, note) < flickDistanceThreshold)
             return false;
 
-        // Containment is the note's own box, not a screen circle: the flick counts while the finger
-        // is still on the note. Once the finger is established on this note the box grows
-        // (osu!-style follow), so the flick's own travel cannot shake it off. A directional flick
-        // additionally has to point the right way.
-        float followScale = touch.DiscreteHitobjectIsInRange && touch.NearestDiscreteHitobject == note
-            ? FlickFollowScale
-            : 1f;
+        // Containment. A directional flick keeps the original beam: the hit radius stretched
+        // indefinitely along FlickDirection. The beam is symmetric, so a backwards flick sits
+        // inside it and is rejected on angle instead — direction is never inferred from position.
+        // It needs no follow expansion, because travelling along the beam cannot leave it.
+        // Omnidirectional containment is the note's band, always grown by FlickFollowScale: the tap
+        // already established the finger on the note, and without the growth the measured-at-current
+        // containment and the travel requirement pull against each other.
+        if (float.IsFinite(note.Current.FlickDirection)) // Directional
+        {
+            float radius = note.HitCoord.Radius;
+            Vector2 offset = current - note.HitCoord.Position;
 
-        if (!note.IsScreenPointInHitBox(current, followScale)) return false;
+            // Rotating the offset by +FlickDirection maps the flick axis onto +Y, so .x is the
+            // perpendicular distance from the beam. .y is deliberately unused — the beam runs
+            // indefinitely both ways, and which way the finger went is the angle check's job.
+            float perpendicular = (Quaternion.Euler(0, 0, note.Current.FlickDirection) * offset).x;
+
+            if (Mathf.Abs(perpendicular) >= radius) return false;
+        }
+        else if (!note.IsScreenPointInHitBox(current, FlickFollowScale)) // Omnidirectional: expanded band
+        {
+            return false;
+        }
 
         if (float.IsFinite(note.Current.FlickDirection) &&
             !ValidateFlickDirection(note.Current.FlickDirection, touch.FlickTracker.FlickAngle))
