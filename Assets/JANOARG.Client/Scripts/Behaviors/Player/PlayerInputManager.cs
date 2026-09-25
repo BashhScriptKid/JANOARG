@@ -1055,13 +1055,25 @@ public class PlayerInputManager : MonoBehaviour
             sr_HoldQueueBlock.Begin();
             if (HoldQueue.Count != 0) // Hold note processor
             {
+                // Holds are tracked live, so the hitbox has to be built against the current lane
+                // state (a lane that storyboards during the hold moves out from under a baked box).
+                // One camera/beat for the whole block, like the old hold path.
+                float beat = PlayerScreen.sTargetSong.Timing.ToBeat((float)judgementOffsetTime);
+
+                var currentCamera =
+                    (CameraController)PlayerScreen.sTargetChart.Data.Camera.GetStoryboardableObject(beat);
+
+                Player.Pseudocamera.transform.position = currentCamera.CameraPivot;
+                Player.Pseudocamera.transform.eulerAngles = currentCamera.CameraRotation;
+                Player.Pseudocamera.transform.Translate(Vector3.back * currentCamera.PivotDistance);
+
                 for (var a = 0; a < HoldQueue.Count; a++)
                 {
                     HoldNoteClass holdNoteEntry = HoldQueue[a];
 
                     // If the hold note doesn't exist (it's already completed)
                     sr_HoldQueueProcessor.Begin();
-                    HoldQueue_Processor(holdNoteEntry, ref a, judgementOffsetTime);
+                    HoldQueue_Processor(holdNoteEntry, ref a, judgementOffsetTime, beat);
                     sr_HoldQueueProcessor.End();
                 }
             }
@@ -1221,7 +1233,29 @@ public class PlayerInputManager : MonoBehaviour
         }
     }
 
-    private void HoldQueue_Processor(HoldNoteClass holdNoteEntry, ref int queuePtr, double judgementOffsetTime)
+    /// <summary>
+    ///     Rebuilds a held note's hitbox from the current lane cross-section and camera. Holds span
+    ///     time, so unlike a tap's load-time bake theirs has to follow a lane that storyboards while
+    ///     the player is holding.
+    /// </summary>
+    private void UpdateHoldHitBox(HitPlayer hit, float beat)
+    {
+        HitObject data = (HitObject)hit.Original.GetStoryboardableObject(beat);
+
+        HitScreenBox box = PlayerScreen.BuildHitBox(
+            hit.Lane.Original, hit.Lane.Group, data, beat,
+            PlayerScreen.sTargetSong.Timing, Player.Pseudocamera,
+            Player.ScaledExtraRadius, Player.ScaledMinimumRadius);
+
+        hit.HitBox = box;
+        hit.HitCoord = new HitScreenCoord
+        {
+            Position = box.Center,
+            Radius = box.LateralHalfVec.magnitude
+        };
+    }
+
+    private void HoldQueue_Processor(HoldNoteClass holdNoteEntry, ref int queuePtr, double judgementOffsetTime, float beat)
     {
         if (!holdNoteEntry.HitObject || holdNoteEntry.HitObject.IsReturned)
         {
@@ -1234,9 +1268,11 @@ public class PlayerInputManager : MonoBehaviour
 
         holdNoteEntry.UpdateDedicatedEffects(Time.deltaTime);
 
-        // Hitbox checker — the note's own baked box, the same rule taps and catches use. It is
-        // centred on the note (so the hold stays grabbable wherever its head is) and its box
-        // already covers Position/Length plus the extra radius.
+        // Rebuild this hold's box against the current lane state every frame so it follows the lane
+        // (and the hold head) while held, rather than staying at its start-beat bake. Same band rule
+        // as taps/catches.
+        UpdateHoldHitBox(holdNoteEntry.HitObject, beat);
+
         holdNoteEntry.AssignedTouch = TouchClasses.Find(touch =>
             holdNoteEntry.HitObject.IsScreenPointInHitBox(touch.Touch.screenPosition));
 
