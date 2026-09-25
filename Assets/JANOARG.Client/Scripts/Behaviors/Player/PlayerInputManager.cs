@@ -1488,11 +1488,11 @@ public class PlayerInputManager : MonoBehaviour
                         touch.Touch.startScreenPosition,
                         hitIteration.HitCoord.Position);
 
-                    // Same note-priority rule the ordinary tap path uses: earliest note wins, and
-                    // the closer one breaks a tie.
+                    // Front-most note wins when boxes overlap (lower z = closer to the camera);
+                    // distance only breaks an exact tie.
                     if (touch.QueuedHit &&
-                        hitIteration.Time > touch.QueuedHit.Time &&
-                        !(Mathf.Approximately(hitIteration.Time, touch.QueuedHit.Time) &&
+                        hitIteration.Frontness > touch.QueuedHit.Frontness &&
+                        !(Mathf.Approximately((float)hitIteration.Frontness, (float)touch.QueuedHit.Frontness) &&
                           tapDistance < touch.QueuedHitDistance))
                         continue;
 
@@ -1648,9 +1648,11 @@ public class PlayerInputManager : MonoBehaviour
                                  ))
                         ) &&
                         (
+                            // Front-most note wins when boxes overlap (lower z = closer to the
+                            // camera); distance only breaks an exact tie.
                             !touch.QueuedHit ||
-                            hitIteration.Time < touch.QueuedHit.Time ||
-                            (Mathf.Approximately(hitIteration.Time, touch.QueuedHit.Time) &&
+                            hitIteration.Frontness < touch.QueuedHit.Frontness ||
+                            (Mathf.Approximately((float)hitIteration.Frontness, (float)touch.QueuedHit.Frontness) &&
                              distance < touch.QueuedHitDistance)
                         )
                     )
