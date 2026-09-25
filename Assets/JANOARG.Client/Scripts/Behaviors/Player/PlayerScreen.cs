@@ -753,8 +753,18 @@ namespace JANOARG.Client.Behaviors.Player
         ///         The cross-section is taken at <paramref name = "beat"/>, pushed through the
         ///         lane-group chain without adding the scroll z, and the note's
         ///         <c>Position→Position+Length</c> span projected. The lateral half-vector gets the
-        ///         extra radius as headroom; the medial axis is the projected lane z axis (the
-        ///         direction that scrolls with time).
+        ///         extra radius as headroom.
+        ///     </para>
+        ///     <para>
+        ///         The medial axis follows the lane geometry in 3D: it is the projected tangent of the
+        ///         note's actual path, i.e. the cross-section drift between this beat and a little
+        ///         later, plus the scroll along the lane's own z axis — all through the lane and group
+        ///         rotations. The lane's z axis alone is not enough, because a LaneStep can slide its
+        ///         XY cross-section while the ribbon scrolls.
+        ///     </para>
+        ///     <para>
+        ///         Shared by the load-time bake and by live holds, which have to follow a lane that
+        ///         moves during the hold.
         ///     </para>
         /// </remarks>
         public static HitScreenBox BuildHitBox(
@@ -767,7 +777,37 @@ namespace JANOARG.Client.Behaviors.Player
             Quaternion laneRot = Quaternion.Euler(lane.Rotation);
             Vector3 startLocal = laneRot * positionStep.StartPosition + lane.Position;
             Vector3 endLocal = laneRot * positionStep.EndPosition + lane.Position;
-            Vector3 medialLocal = laneRot * Vector3.forward;
+
+            // Medial (up/down) direction: the note's 3D path tangent over a small beat step.
+            const float MEDIAL_DELTA_BEAT = 0.05f;
+
+            Lane laneAhead = (Lane)sourceLane.GetStoryboardableObject(beat + MEDIAL_DELTA_BEAT);
+            LanePosition positionStepAhead =
+                laneAhead.GetLanePosition(beat + MEDIAL_DELTA_BEAT, beat + MEDIAL_DELTA_BEAT, timing);
+
+            float lanePosition = data.Position + data.Length / 2f;
+            Vector2 crossNow = Vector2.LerpUnclamped(
+                positionStep.StartPosition, positionStep.EndPosition, lanePosition);
+            Vector2 crossAhead = Vector2.LerpUnclamped(
+                positionStepAhead.StartPosition, positionStepAhead.EndPosition, lanePosition);
+
+            float noteSeconds = timing.ToSeconds(beat);
+            float deltaSeconds = timing.ToSeconds(beat + MEDIAL_DELTA_BEAT) - noteSeconds;
+
+            // The segment's own scroll speed drives the z part of the tangent.
+            float scrollSpeed = lane.LaneSteps[^1].Speed;
+            foreach (LaneStep ls in lane.LaneSteps)
+            {
+                if (timing.ToSeconds(ls.Offset) < noteSeconds) continue;
+
+                scrollSpeed = ls.Speed;
+                break;
+            }
+
+            Vector3 medialLocal = laneRot * new Vector3(
+                crossAhead.x - crossNow.x,
+                crossAhead.y - crossNow.y,
+                scrollSpeed * PlayerScreen.sMain.Speed * deltaSeconds);
 
             // Apply the lane-group chain (root first).
             var groupChain = new List<LaneGroupPlayer>();
