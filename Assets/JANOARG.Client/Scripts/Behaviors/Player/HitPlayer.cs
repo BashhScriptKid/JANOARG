@@ -192,15 +192,30 @@ namespace JANOARG.Client.Behaviors.Player
         /// </remarks>
         /// <param name = "screenPoint"> The screen-space point to test. </param>
         /// <param name = "marginScale"> Grow the band around its centre. </param>
-        public bool IsScreenPointInHitBox(Vector2 screenPoint, float marginScale = 1f)
+        public bool IsScreenPointInHitBox(Vector2 screenPoint, float marginScale = 1f) =>
+            LateralOffsetRatio(screenPoint) <= marginScale;
+
+        /// <summary>
+        ///     How far off the note's centre the point sits laterally, as a fraction of the band's
+        ///     half-width (0 = dead centre, 1 = at the edge).
+        /// </summary>
+        /// <remarks>
+        ///     This is the band-space equivalent of "how close is the tap", for comparing two
+        ///     overlapping bands: centre distance on screen says nothing useful once the band sweeps
+        ///     the whole scroll column.
+        /// </remarks>
+        public float LateralOffsetRatio(Vector2 screenPoint)
         {
             Vector2 medialAxis = HitBox.MedialAxis;
             Vector2 perpendicular = new Vector2(-medialAxis.y, medialAxis.x);
 
             float halfWidth = Mathf.Abs(Vector2.Dot(HitBox.LateralHalfVec, perpendicular));
+
+            if (halfWidth < 0.0001f) return float.PositiveInfinity;
+
             float lateral = Mathf.Abs(Vector2.Dot(screenPoint - HitBox.Center, perpendicular));
 
-            return lateral <= halfWidth * marginScale;
+            return lateral / halfWidth;
         }
 
         public void UpdateMesh()

@@ -1655,43 +1655,29 @@ public class PlayerInputManager : MonoBehaviour
                     float distance = Vector2.Distance(
                         touch.Touch.screenPosition, hitIteration.HitCoord.Position);
 
-                    var discreteTapProtectionPassed = false;
+                    // A tap can sit inside a Normal note's band and an earlier Catch's band at the
+                    // same time — bands sweep the whole scroll column, so this happens far more than
+                    // it did with radii. When the catch's band also contains the tap and the tap is
+                    // at least as centred in it, the player meant the catch: suppress the normal,
+                    // unless the normal itself is a perfect hit or the two are simultaneous.
+                    HitPlayer overlappingCatch = touch.PriorityCatch;
+
+                    bool catchStealsTap =
+                        overlappingCatch != null &&
+                        overlappingCatch.Time < hitIteration.Time &&
+                        hitIteration.Time - overlappingCatch.Time <= Player.GoodWindow * 2 &&
+                        overlappingCatch.LateralOffsetRatio(touch.Touch.screenPosition) <
+                        hitIteration.LateralOffsetRatio(touch.Touch.screenPosition);
+
+                    bool normalExempt =
+                        Math.Abs(hitobjectTimingDelta) <= Player.PerfectWindow ||
+                        (overlappingCatch != null &&
+                         Mathf.Approximately(hitIteration.Time, overlappingCatch.Time));
+
+                    var discreteTapProtectionPassed = !catchStealsTap || normalExempt;
 
                     if (
-                        (
-                            discreteTapProtectionPassed =
-                                !( // Safeguard to prevent false 'early' taps while the player intends to catch notes
-
-                                        // Status check
-                                        touch.DiscreteHitobjectIsInRange &&
-                                        touch.NearestDiscreteHitobject != null &&
-                                        touch.NearestDiscreteHitobject.Current.Type == HitObject.HitType.Catch &&
-
-                                        // Only suppress if the catch note is EARLIER and likely to be triggered by this
-                                        // input
-                                        touch.NearestDiscreteHitobject.Time < hitIteration.Time &&
-                                        hitIteration.Time >= -Player.GoodWindow &&
-
-                                        // Spatial distance comparison
-                                        Vector2.Distance(
-                                            touch.Touch.screenPosition,
-                                            touch.NearestDiscreteHitobject.HitCoord.Position) <
-                                        distance &&
-                                        hitIteration.Time - touch.NearestDiscreteHitobject.Time <= Player.GoodWindow * 2
-                                    ) || // Exception clause
-                                (touch.DiscreteHitobjectIsInRange &&
-                                 touch.NearestDiscreteHitobject != null &&
-                                 ( // Ways that won't break the player's expectation
-                                     Math.Abs(hitobjectTimingDelta) <= Player.PerfectWindow ||
-                                     Mathf.Approximately(hitIteration.Time, touch.NearestDiscreteHitobject.Time) ||
-                                     Mathf.Approximately(
-                                         Vector3.Distance(
-                                             hitIteration.HitCoord.Position,
-                                             touch.NearestDiscreteHitobject.HitCoord
-                                                 .Position),
-                                         hitIteration.HitCoord.Radius / 2)
-                                 ))
-                        ) &&
+                        discreteTapProtectionPassed &&
                         (
                             // Front-most note wins when boxes overlap (lower z = closer to the
                             // camera); distance only breaks an exact tie.
@@ -1708,16 +1694,6 @@ public class PlayerInputManager : MonoBehaviour
                         touch.QueuedHit = hitIteration;
                         touch.QueuedHitDistance = distance;
                         alreadyHit = true;
-                    }
-                    else if (!discreteTapProtectionPassed && touch.NearestDiscreteHitobject != null)
-                    {
-                        //Debug.Log(
-                        //    $"Tap suppressed for hitobject at {hitIteration.Time}. \n" +
-                        //    $"At touch.NearestDiscreteHitobject.Time: {touch.NearestDiscreteHitobject.Time} < hitIteration.Time: {hitIteration.Time}. \n" +
-                        //    $"At touch.NearestDiscreteHitobject.Type: {touch.NearestDiscreteHitobject.Current.Type} \n" +
-                        //    $"At touch.NearestDiscreteHitobject.HitCoord.Position: {touch.NearestDiscreteHitobject.HitCoord.Position} < hitIteration.HitCoord.Position: {hitIteration.HitCoord.Position}.\n" +
-                        //    $"At Hit Delta {hitobjectTimingDelta} >= -{Player.GoodWindow}. \n" +
-                        //    $"At comparison of Discrete-Tap delta {hitIteration.Time - touch.NearestDiscreteHitobject.Time} < {Player.GoodWindow * 2}");
                     }
                 }
 
