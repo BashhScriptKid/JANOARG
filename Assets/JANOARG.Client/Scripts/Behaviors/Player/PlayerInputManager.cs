@@ -525,6 +525,16 @@ public class TouchClass
     public HitPlayer NearestDiscreteHitobject;
 
     /// <summary>
+    ///     The front-most catch note whose band contains this touch this frame.
+    /// </summary>
+    /// <remarks>
+    ///     Bands sweep along the scroll axis, so a touch can fall inside several catches at once,
+    ///     far more often than a radius could. This is the one that should be judged when they
+    ///     overlap — see the pre-pass in <c>UpdateInput</c>.
+    /// </remarks>
+    public HitPlayer PriorityCatch;
+
+    /// <summary>
     ///     The <see cref = "HitPlayer"/> object that the touch interacted with, if any.
     /// </summary>
     public HitPlayer QueuedHit;
@@ -923,6 +933,33 @@ public class PlayerInputManager : MonoBehaviour
             InitLogger(
                 $"Judgement-offset time: {judgementOffsetTime} (Current time: {Player.CurrentTime}, Offset: {Player.Settings.JudgmentOffset})");
 
+            // Per-touch catch priority. Bands extend along the scroll axis, so a touch can be inside
+            // several catches' ranges at once; pick the front-most (lowest lane z) so overlaps are
+            // judged on the note nearest the camera, not on queue order. The HitQueue is time-sorted,
+            // so once a candidate is past its pass window everything later is too.
+            foreach (TouchClass touch in TouchClasses)
+            {
+                touch.PriorityCatch = null;
+
+                for (var a = 0; a < HitQueue.Count; a++)
+                {
+                    HitPlayer candidate = HitQueue[a];
+
+                    if (!candidate || candidate.IsReturned || candidate.IsProcessed) continue;
+                    if (candidate.Current.Type != HitObject.HitType.Catch) continue;
+
+                    double candidateDelta = judgementOffsetTime - candidate.Time;
+
+                    if (candidateDelta < -Player.PassWindow) break;
+                    if (candidateDelta > Player.PassWindow) continue;
+                    if (!candidate.IsScreenPointInHitBox(touch.Touch.screenPosition)) continue;
+
+                    if (touch.PriorityCatch == null ||
+                        candidate.Frontness < touch.PriorityCatch.Frontness)
+                        touch.PriorityCatch = candidate;
+                }
+            }
+
             sr_HitQueueLoop.Begin();
             for (var a = 0; a < HitQueue.Count; a++) // Chart HitObject queue processor
             {
@@ -994,22 +1031,27 @@ public class PlayerInputManager : MonoBehaviour
                             hitIteration.IsScreenPointInHitBox(touch.Touch.screenPosition)
                         )
                         {
-                            // Edge only. This block re-runs every frame the finger is in range, so
-                            // assigning unconditionally would reset the anchor each frame and leave
-                            // the travel gate measuring a single frame of movement. The first term
-                            // catches entering range at all; the second covers an early flick, whose
-                            // note is held in DiscreteHitQueue past the frame that nulls QueuedHit,
-                            // so the clear at resolution never fires and the flag stays set.
-                            if (!touch.DiscreteHitobjectIsInRange ||
-                                touch.NearestDiscreteHitobject != hitIteration)
+                            // Keep the front-most in-range discrete note, since bands overlap far more
+                            // than radii did. The anchor is the travel origin for a catch-flick, so it
+                            // resets only when a note actually takes over as the nearest; a mere
+                            // re-visit of the same note must not reset it every frame.
+                            bool takesOver =
+                                !touch.DiscreteHitobjectIsInRange ||
+                                touch.NearestDiscreteHitobject == null ||
+                                (touch.NearestDiscreteHitobject != hitIteration &&
+                                 hitIteration.Frontness < touch.NearestDiscreteHitobject.Frontness);
+
+                            if (takesOver)
+                            {
                                 touch.DiscreteHitobjectAnchor =
                                     touch.DiscreteHitobjectPeak = touch.Touch.screenPosition;
-                            else if (Vector2.Distance(touch.Touch.screenPosition, touch.DiscreteHitobjectAnchor) >
+                                touch.NearestDiscreteHitobject = hitIteration;
+                                touch.DiscreteHitobjectIsInRange = true;
+                            }
+                            else if (touch.NearestDiscreteHitobject == hitIteration &&
+                                     Vector2.Distance(touch.Touch.screenPosition, touch.DiscreteHitobjectAnchor) >
                                      Vector2.Distance(touch.DiscreteHitobjectPeak, touch.DiscreteHitobjectAnchor))
                                 touch.DiscreteHitobjectPeak = touch.Touch.screenPosition;
-
-                            touch.DiscreteHitobjectIsInRange = true;
-                            touch.NearestDiscreteHitobject = hitIteration;
                         }
 
                     // Pass to DiscreteHitQueue
@@ -1516,6 +1558,9 @@ public class PlayerInputManager : MonoBehaviour
             {
                 distance = 0; // don't let a previous touch's value leak into this one
 
+                // Bands overlap, so only the front-most catch for this touch may take the flick.
+                if (hitIteration != touch.PriorityCatch) continue;
+
                 if (touch.QueuedHit != null && !touch.Flicked) continue;
 
                 if (!f_flickVerifier(hitIteration, touch)) continue;
@@ -1689,6 +1734,7 @@ public class PlayerInputManager : MonoBehaviour
 
                     {
                         bool shouldAssign =
+                            hitIteration == touch.PriorityCatch && // front-most overlapping catch wins
                             !hitIteration.InDiscreteHitQueue && // Slow down on the assigning, due to the nature of catch notes
                             touch.QueuedHit == null; // This touch is already occupied by another hitobject this frame
 
