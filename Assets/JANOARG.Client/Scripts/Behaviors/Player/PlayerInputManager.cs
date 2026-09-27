@@ -933,10 +933,22 @@ public class PlayerInputManager : MonoBehaviour
             InitLogger(
                 $"Judgement-offset time: {judgementOffsetTime} (Current time: {Player.CurrentTime}, Offset: {Player.Settings.JudgmentOffset})");
 
+            // Keep the projection camera at this judgement instant's chart camera before anything
+            // that reads it: the depth ordering (HitPlayer.Frontness) and live hold boxes both go
+            // through Pseudocamera, and nothing else poses it outside the bake.
+            float inputBeat = PlayerScreen.sTargetSong.Timing.ToBeat((float)judgementOffsetTime);
+
+            var inputCamera =
+                (CameraController)PlayerScreen.sTargetChart.Data.Camera.GetStoryboardableObject(inputBeat);
+
+            Player.Pseudocamera.transform.position = inputCamera.CameraPivot;
+            Player.Pseudocamera.transform.eulerAngles = inputCamera.CameraRotation;
+            Player.Pseudocamera.transform.Translate(Vector3.back * inputCamera.PivotDistance);
+
             // Per-touch catch priority. Bands extend along the scroll axis, so a touch can be inside
-            // several catches' ranges at once; pick the front-most (lowest lane z) so overlaps are
-            // judged on the note nearest the camera, not on queue order. The HitQueue is time-sorted,
-            // so once a candidate is past its pass window everything later is too.
+            // several catches' ranges at once; pick the front-most (nearest the camera in its space)
+            // so overlaps are judged on the note nearest the camera, not on queue order. The HitQueue
+            // is time-sorted, so once a candidate is past its pass window everything later is too.
             foreach (TouchClass touch in TouchClasses)
             {
                 touch.PriorityCatch = null;
@@ -1097,25 +1109,16 @@ public class PlayerInputManager : MonoBehaviour
             sr_HoldQueueBlock.Begin();
             if (HoldQueue.Count != 0) // Hold note processor
             {
-                // Holds are tracked live, so the hitbox has to be built against the current lane
-                // state (a lane that storyboards during the hold moves out from under a baked box).
-                // One camera/beat for the whole block, like the old hold path.
-                float beat = PlayerScreen.sTargetSong.Timing.ToBeat((float)judgementOffsetTime);
-
-                var currentCamera =
-                    (CameraController)PlayerScreen.sTargetChart.Data.Camera.GetStoryboardableObject(beat);
-
-                Player.Pseudocamera.transform.position = currentCamera.CameraPivot;
-                Player.Pseudocamera.transform.eulerAngles = currentCamera.CameraRotation;
-                Player.Pseudocamera.transform.Translate(Vector3.back * currentCamera.PivotDistance);
-
+                // Holds are tracked live, so their box is rebuilt against the current lane state and
+                // the projection camera posed above (a lane that storyboards during the hold moves
+                // out from under a baked box).
                 for (var a = 0; a < HoldQueue.Count; a++)
                 {
                     HoldNoteClass holdNoteEntry = HoldQueue[a];
 
                     // If the hold note doesn't exist (it's already completed)
                     sr_HoldQueueProcessor.Begin();
-                    HoldQueue_Processor(holdNoteEntry, ref a, judgementOffsetTime, beat);
+                    HoldQueue_Processor(holdNoteEntry, ref a, judgementOffsetTime, inputBeat);
                     sr_HoldQueueProcessor.End();
                 }
             }

@@ -176,19 +176,21 @@ namespace JANOARG.Client.Behaviors.Player
         }
 
         /// <summary>
-        ///     The note's depth in the render camera's space at the draw clock. Lower is closer to the
-        ///     camera / judgement line, i.e. more "in front" — used to break hitbox overlaps.
+        ///     The note's depth in the projection camera's space at the draw clock. Lower is closer
+        ///     to that camera / the judgement line, i.e. more "in front" — used to break hitbox
+        ///     overlaps.
         /// </summary>
         /// <remarks>
         ///     Deliberately not the lane-local scroll z: a lane carries Position/Rotation storyboards
         ///     and can sit in a rotated group, so its local z does not order notes on screen. Depth
-        ///     along the camera's own forward does, and it stays comparable across lanes.
+        ///     along the camera's own forward does, and it stays comparable across lanes. The input
+        ///     loop poses <c>Pseudocamera</c> at the current chart camera before reading this.
         /// </remarks>
         public double Frontness
         {
             get
             {
-                Camera cam = CommonSys.sMain ? CommonSys.sMain.MainCamera : null;
+                Camera cam = PlayerScreen.sMain ? PlayerScreen.sMain.Pseudocamera : null;
 
                 return cam
                     ? cam.transform.InverseTransformPoint(transform.position).z
