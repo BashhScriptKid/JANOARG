@@ -864,10 +864,18 @@ namespace JANOARG.Client.Behaviors.Player
             float halfWidth = Mathf.Max(lateralLength + extraRadius, minimumRadius);
             lateralHalf = lateralAxis * halfWidth;
 
-            // If the note's own projected extent plus headroom does not reach the accessibility
-            // minimum, the lane shape carries no information: judge it as the radius circle that
-            // minimum was defined for.
-            bool useRadius = lateralLength + extraRadius < minimumRadius;
+            // A lane pointing (nearly) straight at the camera along the view ray projects its scroll
+            // direction to nothing and hides its own tail, so its screen geometry carries no
+            // information: judge such a note as a radius rather than a wedge. Short notes are NOT
+            // this — their minimum width is already enforced by the floor above.
+            const float LANE_FACING_COSINE = 0.966f; // within ~15 degrees of the view ray
+
+            Vector3 toNote = noteCenterWorld - camera.transform.position;
+            float medialLength = medialLocal.magnitude;
+            bool useRadius = medialLength < 0.000001f ||
+                             (toNote.sqrMagnitude > 0.000001f &&
+                              Mathf.Abs(Vector3.Dot(medialLocal, toNote)) >
+                              LANE_FACING_COSINE * medialLength * toNote.magnitude);
 
             // Vanishing point of the projected scroll direction: the point at infinity along the
             // lane's path, under this camera. Absent (direction parallel to the image plane) the

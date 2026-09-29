@@ -938,8 +938,8 @@ namespace JANOARG.Client.Behaviors.Player
         public bool    HasVanishingPoint;
 
         /// <summary>
-        ///     The note's own projected extent + headroom did not reach the accessibility minimum, so
-        ///     the lane shape is meaningless and the band falls back to a radius around the note.
+        ///     The lane points (nearly) straight at the camera, so its projected geometry carries no
+        ///     information and the band falls back to a radius around the note.
         /// </summary>
         public bool UseRadius;
     }
