@@ -844,18 +844,25 @@ namespace JANOARG.Client.Behaviors.Player
             Vector2 center = (hitStart + hitEnd) / 2f;
             Vector2 lateralHalf = (hitEnd - hitStart) / 2f;
             float lateralLength = lateralHalf.magnitude;
-            Vector2 lateralAxis = lateralLength > 0.0001f ? lateralHalf / lateralLength : Vector2.right;
+
+            // Medial (up/down) direction first, so a degenerate lateral span can fall back to its
+            // perpendicular instead of a screen-absolute axis.
+            Vector3 noteCenterWorld = (p0 + p1) / 2f;
+            Vector2 medialScreen = (Vector2)camera.WorldToScreenPoint(noteCenterWorld + medialLocal) - center;
+            Vector2 medialAxis = medialScreen.sqrMagnitude > 0.000001f
+                ? medialScreen.normalized
+                : lateralLength > 0.0001f
+                    ? new Vector2(-lateralHalf.y, lateralHalf.x) / lateralLength
+                    : Vector2.up;
+
+            Vector2 lateralAxis = lateralLength > 0.0001f
+                ? lateralHalf / lateralLength
+                : new Vector2(-medialAxis.y, medialAxis.x);
 
             // Extra radius is lateral headroom only ("slightly wider than it seems"), with the same
             // accessibility floor the original radius bake used.
             float halfWidth = Mathf.Max(lateralLength + extraRadius, minimumRadius);
             lateralHalf = lateralAxis * halfWidth;
-
-            Vector3 noteCenterWorld = (p0 + p1) / 2f;
-            Vector2 medialScreen = (Vector2)camera.WorldToScreenPoint(noteCenterWorld + medialLocal) - center;
-            Vector2 medialAxis = medialScreen.sqrMagnitude > 0.000001f
-                ? medialScreen.normalized
-                : new Vector2(-lateralAxis.y, lateralAxis.x);
 
             return new HitScreenBox
             {

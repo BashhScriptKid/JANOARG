@@ -228,6 +228,11 @@ namespace JANOARG.Client.Behaviors.Player
 
             float halfWidth = Mathf.Abs(Vector2.Dot(HitBox.LateralHalfVec, perpendicular));
 
+            // Floor the perpendicular width with the accessibility minimum, so extreme camera roll
+            // (lateral span nearly parallel to the medial axis) cannot collapse a note to unhittable.
+            float floor = PlayerScreen.sMain ? PlayerScreen.sMain.ScaledMinimumRadius : 0f;
+            halfWidth = Mathf.Max(halfWidth, floor);
+
             if (halfWidth < 0.0001f) return float.PositiveInfinity;
 
             float lateral = Mathf.Abs(Vector2.Dot(screenPoint - HitBox.Center, perpendicular));
