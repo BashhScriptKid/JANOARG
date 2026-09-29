@@ -864,6 +864,11 @@ namespace JANOARG.Client.Behaviors.Player
             float halfWidth = Mathf.Max(lateralLength + extraRadius, minimumRadius);
             lateralHalf = lateralAxis * halfWidth;
 
+            // If the note's own projected extent plus headroom does not reach the accessibility
+            // minimum, the lane shape carries no information: judge it as the radius circle that
+            // minimum was defined for.
+            bool useRadius = lateralLength + extraRadius < minimumRadius;
+
             // Vanishing point of the projected scroll direction: the point at infinity along the
             // lane's path, under this camera. Absent (direction parallel to the image plane) the
             // wedge degenerates to a constant-width strip.
@@ -890,7 +895,8 @@ namespace JANOARG.Client.Behaviors.Player
                 LateralHalfVec = lateralHalf,
                 MedialAxis = medialAxis,
                 VanishingPoint = vanishingPoint,
-                HasVanishingPoint = hasVanishingPoint
+                HasVanishingPoint = hasVanishingPoint,
+                UseRadius = useRadius
             };
         }
 

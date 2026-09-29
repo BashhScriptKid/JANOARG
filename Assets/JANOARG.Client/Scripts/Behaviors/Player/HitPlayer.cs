@@ -206,31 +206,14 @@ namespace JANOARG.Client.Behaviors.Player
         ///     vanishing point through the note's two lateral extremes — converging to the vanishing
         ///     point and extending indefinitely away from it, toward the player. When the scroll
         ///     direction is parallel to the image plane there is no finite vanishing point and it
-        ///     degenerates to a constant-width strip along <see cref = "HitScreenBox.MedialAxis"/>.
-        ///     <paramref name = "marginScale"/> widens the sector for osu!-style flick follow.
+        ///     degenerates to a constant-width strip along <see cref = "HitScreenBox.MedialAxis"/>;
+        ///     when the note itself is below the accessibility minimum it falls back to a radius.
+        ///     <paramref name = "marginScale"/> widens the region for osu!-style flick follow.
         /// </remarks>
         /// <param name = "screenPoint"> The screen-space point to test. </param>
-        /// <param name = "marginScale"> Grow the band around the note. </param>
-        public bool IsScreenPointInHitBox(Vector2 screenPoint, float marginScale = 1f)
-        {
-            if (!HitBox.HasVanishingPoint)
-                return LateralOffsetRatio(screenPoint) <= marginScale;
-
-            Vector2 apex = HitBox.VanishingPoint;
-            Vector2 a = HitBox.Center + HitBox.LateralHalfVec * marginScale - apex;
-            Vector2 b = HitBox.Center - HitBox.LateralHalfVec * marginScale - apex;
-            Vector2 q = screenPoint - apex;
-
-            float reference = Cross(a, b);
-
-            // Degenerate sector (apex inside or on the note span): the strip is the safer reading.
-            if (Mathf.Abs(reference) < 0.000001f)
-                return LateralOffsetRatio(screenPoint) <= marginScale;
-
-            // q = alpha * a + beta * b. The sector toward the note needs both non-negative; the
-            // mirrored sector on the far side of the apex has both negative and is excluded.
-            return reference * Cross(a, q) >= 0f && reference * Cross(q, b) >= 0f;
-        }
+        /// <param name = "marginScale"> Grow the region around the note. </param>
+        public bool IsScreenPointInHitBox(Vector2 screenPoint, float marginScale = 1f) =>
+            LateralOffsetRatio(screenPoint) <= marginScale;
 
         /// <summary>
         ///     How far off the note's centre the point sits across the band, as a fraction of the
@@ -240,10 +223,21 @@ namespace JANOARG.Client.Behaviors.Player
         ///     The band-space equivalent of "how close is the tap", for comparing two overlapping
         ///     bands: screen-centre distance says nothing useful once the band sweeps the whole
         ///     scroll column. For a wedge it is the tap's angular position within the sector; for a
-        ///     strip, its perpendicular offset. Points beyond the vanishing point are off the note.
+        ///     strip, its perpendicular offset; for a sub-minimum note, the plain radius ratio.
+        ///     Points beyond the vanishing point are off the note.
         /// </remarks>
         public float LateralOffsetRatio(Vector2 screenPoint)
         {
+            // Too small to shape: judge it as the accessibility radius circle.
+            if (HitBox.UseRadius)
+            {
+                float radius = HitBox.LateralHalfVec.magnitude;
+
+                if (radius < 0.0001f) return float.PositiveInfinity;
+
+                return Vector2.Distance(screenPoint, HitBox.Center) / radius;
+            }
+
             if (HitBox.HasVanishingPoint)
             {
                 Vector2 apex = HitBox.VanishingPoint;

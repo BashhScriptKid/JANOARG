@@ -936,5 +936,11 @@ namespace JANOARG.Client.Behaviors.Player
         public Vector2 MedialAxis;
         public Vector2 VanishingPoint;
         public bool    HasVanishingPoint;
+
+        /// <summary>
+        ///     The note's own projected extent + headroom did not reach the accessibility minimum, so
+        ///     the lane shape is meaningless and the band falls back to a radius around the note.
+        /// </summary>
+        public bool UseRadius;
     }
 }
