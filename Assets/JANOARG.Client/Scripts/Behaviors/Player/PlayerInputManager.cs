@@ -1497,6 +1497,12 @@ public class PlayerInputManager : MonoBehaviour
         // as taps/catches.
         UpdateHoldHitBox(holdNoteEntry.HitObject, beat);
 
+        // Re-acquire the holding touch every frame; AssignedTouch must clear itself when the finger
+        // leaves the band, lifts, or the band moves away, or the drain never decays and every tick
+        // scores for free.
+        holdNoteEntry.AssignedTouch = TouchClasses.Find(touch =>
+            holdNoteEntry.HitObject.IsScreenPointInHitBox(touch.Touch.screenPosition));
+
         // Taking advantage of inline checks, since List<T>.Find() can give null
         holdNoteEntry.IsPlayerHolding = holdNoteEntry.AssignedTouch != null;
 

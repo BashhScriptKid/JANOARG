@@ -810,10 +810,12 @@ namespace JANOARG.Client.Behaviors.Player
                 scrollSpeed * PlayerScreen.sMain.Speed * deltaSeconds);
 
             // Apply the lane-group chain (root first).
+            // Compose immediate parent -> root. startLocal is already in the lane's parent (the
+            // immediate group's) space, so the innermost transform applies first; reversing this
+            // order would apply the root last and put the band somewhere the lane is not drawn.
             var groupChain = new List<LaneGroupPlayer>();
             LaneGroupPlayer g = laneInGroup;
             while (g) { groupChain.Add(g); g = g.Parent; }
-            groupChain.Reverse();
 
             foreach (LaneGroupPlayer grp in groupChain)
             {
