@@ -864,11 +864,33 @@ namespace JANOARG.Client.Behaviors.Player
             float halfWidth = Mathf.Max(lateralLength + extraRadius, minimumRadius);
             lateralHalf = lateralAxis * halfWidth;
 
+            // Vanishing point of the projected scroll direction: the point at infinity along the
+            // lane's path, under this camera. Absent (direction parallel to the image plane) the
+            // wedge degenerates to a constant-width strip.
+            Vector4 clip = camera.projectionMatrix * camera.worldToCameraMatrix *
+                           new Vector4(medialLocal.x, medialLocal.y, medialLocal.z, 0f);
+            Vector2 clipXY = new Vector2(clip.x, clip.y);
+            float clipXYLength = clipXY.magnitude;
+            bool hasVanishingPoint = clipXYLength > 1e-9f
+                ? Mathf.Abs(clip.w) > 1e-2f * clipXYLength
+                : Mathf.Abs(clip.w) > 1e-9f;
+
+            Vector2 vanishingPoint = default;
+
+            if (hasVanishingPoint)
+            {
+                Vector2 ndc = clipXY / clip.w;
+                vanishingPoint = camera.ViewportToScreenPoint(
+                    new Vector3(ndc.x * 0.5f + 0.5f, ndc.y * 0.5f + 0.5f, 0f));
+            }
+
             return new HitScreenBox
             {
                 Center = center,
                 LateralHalfVec = lateralHalf,
-                MedialAxis = medialAxis
+                MedialAxis = medialAxis,
+                VanishingPoint = vanishingPoint,
+                HasVanishingPoint = hasVanishingPoint
             };
         }
 

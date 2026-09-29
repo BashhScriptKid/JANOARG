@@ -199,30 +199,70 @@ namespace JANOARG.Client.Behaviors.Player
         }
 
         /// <summary>
-        ///     Band containment against the seek-then-baked <see cref = "HitBox"/>.
+        ///     Sector containment against the seek-then-baked <see cref = "HitBox"/>.
         /// </summary>
         /// <remarks>
-        ///     The band is the note's lateral half-vector swept along the medial (z/scroll) axis, so
-        ///     only the component perpendicular to <see cref = "HitScreenBox.MedialAxis"/> is
-        ///     measured; the along-scroll component never rejects a tap. <paramref name = "marginScale"/>
-        ///     grows the band around the note for osu!-style flick follow.
+        ///     The band is the lane swept from the note: the angular sector from the projection's
+        ///     vanishing point through the note's two lateral extremes — converging to the vanishing
+        ///     point and extending indefinitely away from it, toward the player. When the scroll
+        ///     direction is parallel to the image plane there is no finite vanishing point and it
+        ///     degenerates to a constant-width strip along <see cref = "HitScreenBox.MedialAxis"/>.
+        ///     <paramref name = "marginScale"/> widens the sector for osu!-style flick follow.
         /// </remarks>
         /// <param name = "screenPoint"> The screen-space point to test. </param>
-        /// <param name = "marginScale"> Grow the band around its centre. </param>
-        public bool IsScreenPointInHitBox(Vector2 screenPoint, float marginScale = 1f) =>
-            LateralOffsetRatio(screenPoint) <= marginScale;
+        /// <param name = "marginScale"> Grow the band around the note. </param>
+        public bool IsScreenPointInHitBox(Vector2 screenPoint, float marginScale = 1f)
+        {
+            if (!HitBox.HasVanishingPoint)
+                return LateralOffsetRatio(screenPoint) <= marginScale;
+
+            Vector2 apex = HitBox.VanishingPoint;
+            Vector2 a = HitBox.Center + HitBox.LateralHalfVec * marginScale - apex;
+            Vector2 b = HitBox.Center - HitBox.LateralHalfVec * marginScale - apex;
+            Vector2 q = screenPoint - apex;
+
+            float reference = Cross(a, b);
+
+            // Degenerate sector (apex inside or on the note span): the strip is the safer reading.
+            if (Mathf.Abs(reference) < 0.000001f)
+                return LateralOffsetRatio(screenPoint) <= marginScale;
+
+            // q = alpha * a + beta * b. The sector toward the note needs both non-negative; the
+            // mirrored sector on the far side of the apex has both negative and is excluded.
+            return reference * Cross(a, q) >= 0f && reference * Cross(q, b) >= 0f;
+        }
 
         /// <summary>
-        ///     How far off the note's centre the point sits laterally, as a fraction of the band's
+        ///     How far off the note's centre the point sits across the band, as a fraction of the
         ///     half-width (0 = dead centre, 1 = at the edge).
         /// </summary>
         /// <remarks>
-        ///     This is the band-space equivalent of "how close is the tap", for comparing two
-        ///     overlapping bands: centre distance on screen says nothing useful once the band sweeps
-        ///     the whole scroll column.
+        ///     The band-space equivalent of "how close is the tap", for comparing two overlapping
+        ///     bands: screen-centre distance says nothing useful once the band sweeps the whole
+        ///     scroll column. For a wedge it is the tap's angular position within the sector; for a
+        ///     strip, its perpendicular offset. Points beyond the vanishing point are off the note.
         /// </remarks>
         public float LateralOffsetRatio(Vector2 screenPoint)
         {
+            if (HitBox.HasVanishingPoint)
+            {
+                Vector2 apex = HitBox.VanishingPoint;
+                Vector2 a = HitBox.Center + HitBox.LateralHalfVec - apex;
+                Vector2 b = HitBox.Center - HitBox.LateralHalfVec - apex;
+                Vector2 q = screenPoint - apex;
+
+                float reference = Cross(a, b);
+
+                if (Mathf.Abs(reference) >= 0.000001f)
+                {
+                    float alpha = Cross(q, b) / reference;
+                    float beta = Cross(a, q) / reference;
+                    float sum = alpha + beta;
+
+                    return sum > 0f ? Mathf.Abs(alpha - beta) / sum : float.PositiveInfinity;
+                }
+            }
+
             Vector2 medialAxis = HitBox.MedialAxis;
             Vector2 perpendicular = new Vector2(-medialAxis.y, medialAxis.x);
 
@@ -239,6 +279,8 @@ namespace JANOARG.Client.Behaviors.Player
 
             return lateral / halfWidth;
         }
+
+        private static float Cross(Vector2 a, Vector2 b) => a.x * b.y - a.y * b.x;
 
         public void UpdateMesh()
         {

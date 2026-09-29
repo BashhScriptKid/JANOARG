@@ -908,16 +908,19 @@ namespace JANOARG.Client.Behaviors.Player
     }
 
     /// <summary>
-    ///     A note's baked, screen-space hitbox: a band centred on the note.
+    ///     A note's baked, screen-space hitbox: the lane swept from the note.
     /// </summary>
     /// <remarks>
     ///     <para>
     ///         <see cref = "LateralHalfVec"/> is the note's half-span along its own start→end
     ///         (the cross-section, including the extra lateral headroom), as a screen vector from
-    ///         the centre. <see cref = "MedialAxis"/> is the projected z axis — the direction the
-    ///         lane scrolls with time. The band is the lateral span swept along the medial axis
-    ///         (up toward the visual lane and down as extrapolation), so containment only measures
-    ///         the component perpendicular to <see cref = "MedialAxis"/>.
+    ///         the centre. <see cref = "MedialAxis"/> is the projected scroll/path direction and
+    ///         <see cref = "VanishingPoint"/> its projection's vanishing point. The band is the
+    ///         angular sector from that point through the note's two lateral extremes — the lane's
+    ///         perspective wedge, which converges to the vanishing point and extends indefinitely
+    ///         away from it (below the note, toward the player). When the scroll direction is
+    ///         parallel to the image plane there is no finite vanishing point and the sector
+    ///         degenerates to a constant-width strip along <see cref = "MedialAxis"/>.
     ///     </para>
     ///     <para>
     ///         <see cref = "Center"/> is the note's screen centre (at the judgement line) so hit
@@ -931,5 +934,7 @@ namespace JANOARG.Client.Behaviors.Player
         public Vector2 Center;
         public Vector2 LateralHalfVec;
         public Vector2 MedialAxis;
+        public Vector2 VanishingPoint;
+        public bool    HasVanishingPoint;
     }
 }
