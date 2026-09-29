@@ -1129,7 +1129,7 @@ public class PlayerInputManager : MonoBehaviour
 
                     if (candidateDelta < -Player.PassWindow) break;
                     if (candidateDelta > Player.PassWindow) continue;
-                    if (!candidate.IsScreenPointInHitBox(touch.Touch.screenPosition)) continue;
+                    if (!IsCatchCandidateInRange(candidate, touch)) continue;
 
                     if (touch.PriorityCatch == null ||
                         candidate.Frontness < touch.PriorityCatch.Frontness)
@@ -1239,6 +1239,16 @@ public class PlayerInputManager : MonoBehaviour
                         hitIteration.InDiscreteHitQueue = false;
                         hitIteration.IsPendingJudgement = true;
 
+                        // The note is owned now and resolves at its own time; release any touch still
+                        // tracking it, or it keeps suppressing later normal taps and mis-anchors flick
+                        // travel after the note is done with the finger.
+                        foreach (TouchClass touch in TouchClasses)
+                            if (touch.NearestDiscreteHitobject == hitIteration)
+                            {
+                                touch.NearestDiscreteHitobject = null;
+                                touch.DiscreteHitobjectIsInRange = false;
+                            }
+
                         // Remove from the main queue
                         HitQueue.Remove(hitIteration);
                         a--; // Compensate for the removed element so the next entry isn't skipped
@@ -1253,11 +1263,16 @@ public class PlayerInputManager : MonoBehaviour
 
                         // Clear any touch that was assigned to this missed hit
                         foreach (TouchClass touch in TouchClasses)
+                        {
                             if (touch.QueuedHit == hitIteration)
-                            {
                                 touch.QueuedHit = null;
+
+                            if (touch.NearestDiscreteHitobject == hitIteration)
+                            {
+                                touch.NearestDiscreteHitobject = null;
                                 touch.DiscreteHitobjectIsInRange = false;
                             }
+                        }
 
                         //Debug.Log(
                         //    $"Hitobject at {hitIteration.Time} ({hitIteration.Current.Type}) missed. Radius: {hitIteration.HitCoord.Radius}, Hold? {(hitIteration.PendingHoldQueue ? "Yes" : "No")}");
@@ -1624,6 +1639,52 @@ public class PlayerInputManager : MonoBehaviour
         Mathf.Abs((Quaternion.Euler(0, 0, flickDirection) * offset).x);
 
     /// <summary>
+    ///     Whether a catch is under the touch for priority purposes, using the same containment its
+    ///     consumer will: the band for a tap catch, the beam for a directional flickable catch, and
+    ///     the follow-grown band for an established omnidirectional one.
+    /// </summary>
+    private bool IsCatchCandidateInRange(HitPlayer candidate, TouchClass touch)
+    {
+        if (!candidate.Current.Flickable)
+            return candidate.IsScreenPointInHitBox(touch.Touch.screenPosition);
+
+        if (IsDirectionalFlick(candidate.Current.FlickDirection))
+            return FlickPerpendicular(
+                candidate.Current.FlickDirection,
+                touch.Touch.screenPosition - candidate.HitCoord.Position) < candidate.HitCoord.Radius;
+
+        float followScale =
+            touch.DiscreteHitobjectIsInRange && touch.NearestDiscreteHitobject == candidate
+                ? FlickFollowScale
+                : 1f;
+
+        return candidate.IsScreenPointInHitBox(touch.Touch.screenPosition, followScale);
+    }
+
+    /// <summary>
+    ///     Whether a catch owning the touch should block <paramref name = "note"/>'s tap as a
+    ///     premature normal trigger. The escapes are the tap being flawless on the normal, the two
+    ///     notes being simultaneous, or the tap sitting more centrally on the normal than on the
+    ///     catch in band terms.
+    /// </summary>
+    private bool CatchSuppressesTap(TouchClass touch, HitPlayer note, double hitobjectTimingDelta)
+    {
+        HitPlayer catcher = touch.NearestDiscreteHitobject;
+
+        if (!touch.DiscreteHitobjectIsInRange || catcher == null ||
+            catcher.Current.Type != HitObject.HitType.Catch)
+            return false;
+
+        bool legitimate =
+            Math.Abs(hitobjectTimingDelta) <= Player.PerfectWindow ||
+            Mathf.Approximately(note.Time, catcher.Time) ||
+            note.LateralOffsetRatio(touch.Touch.screenPosition) <
+            catcher.LateralOffsetRatio(touch.Touch.screenPosition);
+
+        return !legitimate;
+    }
+
+    /// <summary>
     ///     The displacement vector a flick on <paramref name = "note"/> should be judged on.
     /// </summary>
     /// <remarks>
@@ -1749,6 +1810,11 @@ public class PlayerInputManager : MonoBehaviour
                     if (!hitIteration.IsScreenPointInHitBox(touch.Touch.startScreenPosition))
                         continue;
 
+                    // A catch owning the touch suppresses this claim too — a flickable normal's tap is
+                    // still a premature normal tap when the finger is there for the catch.
+                    if (CatchSuppressesTap(touch, hitIteration, hitobjectTimingDelta))
+                        continue;
+
                     float tapDistance = Vector2.Distance(
                         touch.Touch.startScreenPosition,
                         hitIteration.HitCoord.Position);
@@ -1790,6 +1856,15 @@ public class PlayerInputManager : MonoBehaviour
                 if (hitIteration != touch.PriorityCatch) continue;
 
                 if (touch.QueuedHit != null && !touch.Flicked) continue;
+
+                // A pending tap-flick claim survives across frames. Only a catch in front of it may
+                // steal the latched flick; otherwise the claim resolves it when its note comes round.
+                if (touch.QueuedHit != null && touch.QueuedHit != hitIteration &&
+                    touch.QueuedHit.Current.Flickable &&
+                    touch.QueuedHit.Current.Type == HitObject.HitType.Normal &&
+                    !touch.QueuedHit.IsProcessed &&
+                    touch.QueuedHit.Frontness <= hitIteration.Frontness)
+                    continue;
 
                 if (!f_flickVerifier(hitIteration, touch)) continue;
 
@@ -1906,41 +1981,22 @@ public class PlayerInputManager : MonoBehaviour
                     if (!hitIteration.IsScreenPointInHitBox(touch.Touch.screenPosition))
                         continue;
 
+                    // A catch owning the touch blocks a nearby normal from triggering prematurely —
+                    // the finger is there for the catch, not this note. See CatchSuppressesTap for the
+                    // escapes.
+                    if (CatchSuppressesTap(touch, hitIteration, hitobjectTimingDelta))
+                        continue;
+
                     float distance = Vector2.Distance(
                         touch.Touch.screenPosition, hitIteration.HitCoord.Position);
 
-                    // A discrete (catch) note under the finger blocks a nearby normal from being
-                    // triggered prematurely — the touch is there for the catch, not this note. This is
-                    // intentionally unconditional with respect to order, proximity and timing windows:
-                    // if any catch owns the touch, normals wait their turn.
-                    bool onCatch =
-                        touch.DiscreteHitobjectIsInRange &&
-                        touch.NearestDiscreteHitobject != null &&
-                        touch.NearestDiscreteHitobject.Current.Type == HitObject.HitType.Catch;
-
-                    // The one escape is a tap that is genuinely on the normal — flawless, coincident
-                    // with the catch, or more centred on the normal than on the catch in band terms.
-                    // That is not a premature trigger, so it is allowed even while a catch owns the
-                    // touch.
-                    bool legitimateHit =
-                        onCatch &&
-                        (Math.Abs(hitobjectTimingDelta) <= Player.PerfectWindow ||
-                         Mathf.Approximately(hitIteration.Time, touch.NearestDiscreteHitobject.Time) ||
-                         hitIteration.LateralOffsetRatio(touch.Touch.screenPosition) <
-                         touch.NearestDiscreteHitobject.LateralOffsetRatio(touch.Touch.screenPosition));
-
-                    bool discreteTapProtectionPassed = !onCatch || legitimateHit;
-
                     if (
-                        discreteTapProtectionPassed &&
-                        (
-                            // Front-most note wins when boxes overlap (lower z = closer to the
-                            // camera); distance only breaks an exact tie.
-                            !touch.QueuedHit ||
-                            hitIteration.Frontness < touch.QueuedHit.Frontness ||
-                            (Mathf.Approximately((float)hitIteration.Frontness, (float)touch.QueuedHit.Frontness) &&
-                             distance < touch.QueuedHitDistance)
-                        )
+                        // Front-most note wins when boxes overlap (lower z = closer to the
+                        // camera); distance only breaks an exact tie.
+                        !touch.QueuedHit ||
+                        hitIteration.Frontness < touch.QueuedHit.Frontness ||
+                        (Mathf.Approximately((float)hitIteration.Frontness, (float)touch.QueuedHit.Frontness) &&
+                         distance < touch.QueuedHitDistance)
                     )
                     {
                         touch.QueuedHit = hitIteration;
