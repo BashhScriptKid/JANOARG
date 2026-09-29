@@ -719,7 +719,14 @@ namespace JANOARG.Client.Behaviors.Player
             const float TARGET_ASPECT = 7 / 4f;
             float targetHeight = Mathf.Min(Screen.height, Screen.width / TARGET_ASPECT);
             float camRatio = targetHeight / Screen.height;
-            CommonSys.sMain.MainCamera.fieldOfView = Mathf.Atan2(Mathf.Tan(30 * Mathf.Deg2Rad), camRatio) * 2 * Mathf.Rad2Deg;
+            float fieldOfView = Mathf.Atan2(Mathf.Tan(30 * Mathf.Deg2Rad), camRatio) * 2 * Mathf.Rad2Deg;
+
+            CommonSys.sMain.MainCamera.fieldOfView = fieldOfView;
+
+            // The hit areas are baked and posed through Pseudocamera, so it has to share the render
+            // view's projection. The canvas is the phone's view and its aspect varies; a fixed FOV
+            // would scale every band relative to what the player actually sees.
+            Pseudocamera.fieldOfView = fieldOfView;
 
             yield return new WaitForEndOfFrame();
         }
