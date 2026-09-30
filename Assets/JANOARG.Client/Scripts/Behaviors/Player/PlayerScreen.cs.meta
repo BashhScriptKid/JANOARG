@@ -3,7 +3,42 @@ guid: d6a77452eee572143885d7f2de9a957c
 MonoImporter:
   externalObjects: {}
   serializedVersion: 2
-  defaultReferences: []
+  defaultReferences:
+  - RunChart: {fileID: 5022602860645237092, guid: 909504d77429404429aa713daa703c87, type: 3}
+  - Chart: {fileID: 5022602860645237092, guid: 21ac745cd5847bc4fa63a1f05b290edf, type: 3}
+  - Music: {instanceID: 0}
+  - Hitsounds: {instanceID: 0}
+  - Pseudocamera: {instanceID: 0}
+  - Holder: {instanceID: 0}
+  - PlayerHUD: {instanceID: 0}
+  - SongNameLabel: {instanceID: 0}
+  - SongArtistLabel: {instanceID: 0}
+  - DifficultyNameLabel: {instanceID: 0}
+  - DifficultyLabel: {instanceID: 0}
+  - SongProgress: {instanceID: 0}
+  - SongProgressBody: {instanceID: 0}
+  - SongProgressTip: {instanceID: 0}
+  - SongProgressGlow: {instanceID: 0}
+  - ScoreCounter: {instanceID: 0}
+  - JudgmentGroup: {instanceID: 0}
+  - JudgmentLabel: {instanceID: 0}
+  - ComboGroup: {instanceID: 0}
+  - ComboLabel: {instanceID: 0}
+  - JudgeScreenHolder: {instanceID: 0}
+  - JudgeScreen: {instanceID: 0}
+  - JudgeScreenManager: {instanceID: 0}
+  - HitPlayerPoolHolder: {instanceID: 0}
+  - PauseLabel: {instanceID: 0}
+  - LaneGroupSample: {instanceID: 0}
+  - LaneSample: {instanceID: 0}
+  - HitSample: {instanceID: 0}
+  - HoldSample: {instanceID: 0}
+  - JudgeScreenSample: {instanceID: 0}
+  - FreeFlickIndicator: {instanceID: 0}
+  - ArrowFlickIndicator: {instanceID: 0}
+  - NormalHitsound: {instanceID: 0}
+  - CatchHitsound: {instanceID: 0}
+  - FlickHitsound: {instanceID: 0}
   executionOrder: 0
   icon: {instanceID: 0}
   userData: 

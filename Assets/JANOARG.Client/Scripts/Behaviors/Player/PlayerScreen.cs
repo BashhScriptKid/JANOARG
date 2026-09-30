@@ -17,6 +17,8 @@ using UnityEngine;
 using UnityEngine.SceneManagement;
 using UnityEngine.Serialization;
 using UnityEngine.UI;
+using static JANOARG.Client.Behaviors.Player.Utils;
+using static JANOARG.Shared.Data.ChartInfo.TimestampIDs;
 
 namespace JANOARG.Client.Behaviors.Player
 {
@@ -925,6 +927,25 @@ namespace JANOARG.Client.Behaviors.Player
 
                     _PendingLanes.Add((cueTime, instancedLane));
 
+                    var cindex = 0;
+                    var lane = instancedLane.Original;
+                    var timing = sTargetSong.Timing;
+                    
+                    var laneSampler = new StoryboardableMultisampler(lane);
+                    
+                    var camera = Pseudocamera;
+                    var cameraSampler = new StoryboardableMultisampler(sTargetChart.Data.Camera);
+
+                    var groupChain = new List<LaneGroupPlayer>();
+                    LaneGroupPlayer g = laneInGroup;
+                    while (g) { groupChain.Add(g); g = g.Parent; }
+                    groupChain.Reverse();
+                    var groupChainWatcher = new List<StoryboardableMultisampler>(groupChain.Count);
+                    foreach (var player in groupChain)
+                    {
+                        groupChainWatcher.Add(new StoryboardableMultisampler(player.Original));
+                    }
+
                     foreach (HitObject laneHitobject in instancedLane.Original.Objects)
                     {
                         // Add ExScore by note type
@@ -941,7 +962,104 @@ namespace JANOARG.Client.Behaviors.Player
                                 TotalExScore += 1;
                         }
 
-                        BakeHitBox(instancedLane, laneInGroup, laneHitobject);
+                        var beat = laneHitobject.Offset;
+                        laneSampler.Resample(beat);
+                        cameraSampler.Resample(beat);
+
+
+                        CameraController hitObjectCamera =
+                            (CameraController)sTargetChart.Data.Camera.GetStoryboardableObject(laneHitobject.Offset);
+                        Pseudocamera.transform.localPosition = new Vector3(
+                            cameraSampler.Get(CameraPivot_X),
+                            cameraSampler.Get(CameraPivot_Y),
+                            cameraSampler.Get(CameraPivot_Z)
+                        );
+                        Pseudocamera.transform.localEulerAngles = new Vector3(
+                            cameraSampler.Get(CameraRotation_X),
+                            cameraSampler.Get(CameraRotation_Y),
+                            cameraSampler.Get(CameraRotation_Z)
+                        );;
+                        Pseudocamera.transform.Translate(Vector3.back * cameraSampler.Get(PivotDistance));
+                        
+                        var laneEuler = new Vector3(
+                            laneSampler.Get(OffsetRotation_X),
+                            laneSampler.Get(OffsetRotation_Y),
+                            laneSampler.Get(OffsetRotation_Z)
+                        );
+                        var lanePosition = new Vector3(
+                            laneSampler.Get(Offset_X),
+                            laneSampler.Get(Offset_Y),
+                            laneSampler.Get(Offset_Z)
+                        );
+                        var (lanePos, index) = lane.laneLocalPositionWithoutOffset(beat, timing, cindex);
+                        cindex = index;
+                        var rot = Quaternion.Euler(laneEuler);
+
+                        var start = rot * lanePos.StartPosition + lanePosition;
+                        var end = rot * lanePos.EndPosition + lanePosition;
+
+                        const float MEDIAL_DELTA_BEAT = 0.05f;
+                        var beatAhead = beat + MEDIAL_DELTA_BEAT;
+                        var (lanePosAhead, _) = lane.laneLocalPositionWithoutOffset(beatAhead, timing, cindex);
+                        var localCenter = laneHitobject.Position + laneHitobject.Length * 0.5f;
+                        var strideCenter = Vector2.LerpUnclamped(lanePos.StartPosition, lanePos.EndPosition, localCenter);
+                        var strideCenterAhead = Vector2.LerpUnclamped(lanePosAhead.StartPosition, lanePosAhead.EndPosition, localCenter);
+                        
+                        var noteSeconds = timing.ToSeconds(beat);
+                        var deltaSeconds = timing.ToSeconds(beatAhead) - noteSeconds;
+                        var scrollSpeed = lane.ceilStepOrLastWithSeconds(noteSeconds, timing, cindex).Speed;
+                        var medialLocal = rot * new Vector3(
+                            strideCenterAhead.x - strideCenter.x,
+                            strideCenterAhead.y - strideCenter.y,
+                            scrollSpeed * PlayerScreen.sMain.Speed * deltaSeconds
+                        );
+
+                        foreach (var watch in groupChainWatcher)
+                        {
+                            watch.Resample(beat);
+                            var g_Pos = new Vector3(
+                                watch.Get(TimestampIDs.Position_X),
+                                watch.Get(TimestampIDs.Position_Y),
+                                watch.Get(TimestampIDs.Position_Z)
+                            );
+                            var g_Rot = Quaternion.Euler(new Vector3(
+                                watch.Get(TimestampIDs.Rotation_X),
+                                watch.Get(TimestampIDs.Rotation_Y),
+                                watch.Get(TimestampIDs.Rotation_Z)
+                            ));
+
+                            start = g_Rot * start + g_Pos;
+                            start = g_Rot * end + g_Pos;
+                            medialLocal = g_Rot * medialLocal;
+                        }
+
+                        var p0 = Vector3.LerpUnclamped(start, end, laneHitobject.Position);
+                        var p1 = Vector3.LerpUnclamped(start, end, laneHitobject.Position + laneHitobject.Length);
+
+                        Vector2 hitStart = camera.WorldToScreenPoint(p0);
+                        Vector2 hitEnd = camera.WorldToScreenPoint(p1);
+
+                        var center = (hitStart + hitEnd) / 2f;
+                        var lateralHalf = (hitEnd - hitStart) / 2f;
+                        var lateralLength = lateralHalf.magnitude;
+                        Vector2 lateralAxis = lateralLength > 0.0001f ? lateralHalf / lateralLength : Vector2.right;
+
+                        // Extra radius is lateral headroom only ("slightly wider than it seems"), with the same
+                        // accessibility floor the original radius bake used.
+                        var halfWidth = Mathf.Max(lateralLength + ScaledExtraRadius, ScaledMinimumRadius);
+                        lateralHalf = lateralAxis * halfWidth;
+
+                        var noteCenterWorld = (p0 + p1) / 2f;
+                        var medialScreen = (Vector2)camera.WorldToScreenPoint(noteCenterWorld + medialLocal) - center;
+                        var medialAxis = medialScreen.sqrMagnitude > 0.000001f
+                            ? medialScreen.normalized
+                            : new Vector2(-lateralAxis.y, lateralAxis.x);
+                        instancedLane.HitBoxes.Add(new HitScreenBox
+                        {
+                            Center = center,
+                            LateralHalfVec = lateralHalf,
+                            MedialAxis = medialAxis
+                        });
                     }
 
                     HitsRemaining += instancedLane.Original.Objects.Count;
