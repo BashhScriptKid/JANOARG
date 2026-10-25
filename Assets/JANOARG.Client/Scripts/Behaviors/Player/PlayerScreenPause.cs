@@ -7,6 +7,8 @@ using UnityEngine;
 using UnityEngine.SceneManagement;
 using UnityEngine.UI;
 
+using JANOARG.Client.Behaviors.Player.PlayerInput.Core;
+
 namespace JANOARG.Client.Behaviors.Player
 {
     public class PlayerScreenPause : MonoBehaviour
@@ -54,8 +56,8 @@ namespace JANOARG.Client.Behaviors.Player
                 PlayerScreen.sMain.SuspendMusicSchedule();
                 PlayerScreen.sMain.ComputeAndSaveMedianOffset();
 
-                // PlayerInputManager.main.Fingers.Clear();
-                PlayerInputManager.sInstance.TouchClasses.Clear();
+                // PlayerInputEngine.main.Fingers.Clear();
+                PlayerInputEngine.sInstance.TouchClasses.Clear();
                 Show();
             }
             else

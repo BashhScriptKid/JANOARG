@@ -5,6 +5,8 @@ using Unity.Profiling;
 using UnityEngine;
 using UnityEngine.Serialization;
 
+using JANOARG.Client.Behaviors.Player.PlayerInput.Core;
+
 namespace JANOARG.Client.Behaviors.Player
 {
     public class LanePlayer : MonoBehaviour
@@ -557,7 +559,7 @@ namespace JANOARG.Client.Behaviors.Player
                     // Init first: AddToQueue marks the note pending for autoplay, and Init is what
                     // resets that flag for a reused pooled instance.
                     player.Init();
-                    PlayerInputManager.sInstance.AddToQueue(player);
+                    PlayerInputEngine.sInstance.AddToQueue(player);
 
                     Current.Objects.RemoveAt(0);
                     _HitObjectTime = float.NaN;
