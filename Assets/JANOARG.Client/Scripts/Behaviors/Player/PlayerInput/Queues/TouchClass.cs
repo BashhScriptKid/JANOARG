@@ -3,7 +3,6 @@ using System.Collections.Generic;
 using System.Linq;
 using JANOARG.Client.Behaviors.Common;
 using JANOARG.Client.Behaviors.Player;
-using JANOARG.Client.Behaviors.Player.PlayerInput.Core;
 using JANOARG.Shared.Data.ChartInfo;
 using Unity.Collections;
 using Unity.Profiling;
@@ -76,6 +75,16 @@ public class TouchClass
     public HitPlayer NearestDiscreteHitobject;
 
     /// <summary>
+    ///     The front-most catch note whose band contains this touch this frame.
+    /// </summary>
+    /// <remarks>
+    ///     Bands sweep along the scroll axis, so a touch can fall inside several catches at once,
+    ///     far more often than a radius could. This is the one that should be judged when they
+    ///     overlap — see the pre-pass in <c>UpdateInput</c>.
+    /// </remarks>
+    public HitPlayer PriorityCatch;
+
+    /// <summary>
     ///     The <see cref = "HitPlayer"/> object that the touch interacted with, if any.
     /// </summary>
     public HitPlayer QueuedHit;
@@ -92,7 +101,7 @@ public class TouchClass
 
     /// <summary>
     ///     Flick gesture recognizer for this touch. Owns detection only; every judgement
-    ///     decision that follows from it stays in <see cref = "PlayerInputEngine"/>.
+    ///     decision that follows from it stays in <see cref = "PlayerInputManager"/>.
     /// </summary>
     public FlickTracker FlickTracker = FlickTracker.Create();
 

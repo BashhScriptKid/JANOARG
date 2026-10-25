@@ -6,6 +6,8 @@ using Unity.Profiling;
 using UnityEngine;
 using UnityEngine.Serialization;
 
+using JANOARG.Client.Behaviors.Player.PlayerInput.Core;
+
 namespace JANOARG.Client.Behaviors.Player
 {
     public class LanePlayer : MonoBehaviour

@@ -2,6 +2,8 @@ using JANOARG.Client.Behaviors.Player;
 using JANOARG.Client.Behaviors.Player.PlayerInput.Core;
 using UnityEngine;
 
+using JANOARG.Client.Behaviors.Player.PlayerInput.Core;
+
 namespace JANOARG.Client.Profiling
 {
     /// <summary>

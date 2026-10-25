@@ -8,6 +8,8 @@ using UnityEngine;
 using UnityEngine.SceneManagement;
 using UnityEngine.UI;
 
+using JANOARG.Client.Behaviors.Player.PlayerInput.Core;
+
 namespace JANOARG.Client.Behaviors.Player
 {
     public class PlayerScreenPause : MonoBehaviour
