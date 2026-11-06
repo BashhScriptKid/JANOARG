@@ -90,19 +90,14 @@ namespace JANOARG.Client.Behaviors.Player
         [Tooltip("Clip time (s) of the drop in the flawless fanfare. Playback begins 4.5s before it, like the normal one.")]
         public float FanfareFlawlessStart = 21.334f;
 
-        [Tooltip("Stutter gates as (close, open) offsets from the drop, in seconds. The count-up freezes inside each one.")]
-        public Vector2[] FlawlessGates =
-        {
-            new(-0.5507f, -0.4859f),
-            new(-0.3906f, -0.3208f),
-            new(-0.2240f, -0.1526f),
-        };
+        [Tooltip("Where the stutter begins, as an offset from the drop in seconds. The animated result UI hides here.")]
+        public float FlawlessStutterStart = -0.5507f;
 
-        [Tooltip("Audio output latency (s). Raise it if the freeze lands before you hear the gap.")]
+        [Tooltip("Where the stutter ends (its last re-attack), as an offset from the drop in seconds. The UI comes back here and catches up hard to land on the drop.")]
+        public float FlawlessStutterEnd = -0.1526f;
+
+        [Tooltip("Audio output latency (s). Raise it if the UI hides before you hear the stutter begin.")]
         public float FlawlessSyncOffset;
-
-        [Tooltip("Flash dim alpha while a gate is closed.")]
-        [Range(0, 1)] public float FlawlessGateDim = .75f;
 
         [Tooltip("Peak alpha of the white flash on the drop.")]
         [Range(0, 1)] public float FlawlessFlashPeak = .85f;
@@ -843,9 +838,10 @@ namespace JANOARG.Client.Behaviors.Player
         }
 
         // ---- ALL FLAWLESS branch -------------------------------------------------------------------------
-        // The flawless fanfare gates itself three times just before its drop. The count-up is driven by the
-        // audio clock instead of wall time, and freezes inside each gate, so the screen appears to lag in
-        // step with the music. It still lands on the full score exactly at the drop, then explodes.
+        // The flawless fanfare stutters for about 0.4s just before its drop. The count-up is driven by the
+        // audio clock instead of wall time: it runs normally, then everything it animates hides for the
+        // length of the stutter (the screen looks hung), and when the stutter ends it comes back and
+        // accelerates hard to the full score, landing exactly on the drop, where it explodes.
 
         /// <summary>Heard position of the fanfare relative to its drop, in seconds (negative before it).</summary>
         private float FanfareRel()
@@ -854,39 +850,29 @@ namespace JANOARG.Client.Behaviors.Player
             return (float)clipTime - FlawlessSyncOffset - FanfareFlawlessStart;
         }
 
-        /// <summary>Seconds of count-up already swallowed by gates at <paramref name="rel" />.</summary>
-        private float GateFrozen(float rel)
+        /// <summary>Shows or hides everything the count-up animates (banner bar, score, breakdown, rings).</summary>
+        private void SetCountUpVisible(bool visible)
         {
-            float frozen = 0;
-            foreach (Vector2 g in FlawlessGates)
-                frozen += Mathf.Clamp(rel, g.x, g.y) - g.x;
-
-            return frozen;
+            ResultBackground.enabled = visible;
+            ScoreHolder.gameObject.SetActive(visible);
+            Details.gameObject.SetActive(visible);
+            ScoreExplosionRings[0].enabled = visible;
+            ScoreExplosionRings[1].enabled = visible;
         }
 
-        private bool InGate(float rel)
-        {
-            foreach (Vector2 g in FlawlessGates)
-                if (rel >= g.x && rel < g.y)
-                    return true;
-
-            return false;
-        }
+        // Accelerating on purpose: a lot of score is still left when the UI hides, so the catch-up is a jump.
+        private static float FlawlessScoreCurve(float x) =>
+            Ease.Get(x, EaseFunction.Quadratic, EaseMode.In);
 
         private IEnumerator FlawlessCountUp(Action<float, float> frame)
         {
             // Same length as the normal count-up, which also ends on the drop.
             const float COUNT_LENGTH = 2.5f;
 
-            float swallowed = 0;
-            foreach (Vector2 g in FlawlessGates)
-                swallowed += g.y - g.x;
+            // Where the count-up is when the stutter hits. It stays there, hidden, until the stutter ends.
+            float held = Mathf.Clamp01((FlawlessStutterStart + COUNT_LENGTH) / COUNT_LENGTH);
 
-            // Seconds of count-up that actually advance once the gates are taken out.
-            float live = COUNT_LENGTH - swallowed;
-
-            Color dim = new(0, 0, 0, .4f);
-            Color gated = new(0, 0, 0, FlawlessGateDim);
+            bool hidden = false;
             float waited = 0;
 
             while (true)
@@ -897,18 +883,41 @@ namespace JANOARG.Client.Behaviors.Player
                 // If the clock stops moving (source stopped, app paused), don't hang the result screen.
                 if (rel >= 0 || waited > COUNT_LENGTH + 1.5f) break;
 
-                float x = Mathf.Clamp01((rel + COUNT_LENGTH - GateFrozen(rel)) / live);
+                if (rel < FlawlessStutterStart)
+                {
+                    // Before the stutter: counts up as normal.
+                    float x = Mathf.Clamp01((rel + COUNT_LENGTH) / COUNT_LENGTH);
+                    frame(x, FlawlessScoreCurve(x));
+                }
+                else if (rel < FlawlessStutterEnd)
+                {
+                    // During the stutter: nothing is shown and nothing updates.
+                    if (!hidden)
+                    {
+                        SetCountUpVisible(false);
+                        hidden = true;
+                    }
+                }
+                else
+                {
+                    // Stutter over: back from where it was held, accelerating hard so it lands on the drop.
+                    if (hidden)
+                    {
+                        SetCountUpVisible(true);
+                        hidden = false;
+                    }
 
-                // Accelerating on purpose: the number is still climbing fast when the gates hit,
-                // so the freezes read as lag instead of as a finished count-up.
-                frame(x, Ease.Get(x, EaseFunction.Quadratic, EaseMode.In));
-                FlashBackground.color = InGate(rel) ? gated : dim;
+                    float u = Mathf.InverseLerp(FlawlessStutterEnd, 0, rel);
+                    float x = Mathf.Lerp(held, 1, Ease.Get(u, EaseFunction.Exponential, EaseMode.In));
+                    frame(x, FlawlessScoreCurve(x));
+                }
 
                 yield return null;
             }
 
+            // Whatever way the loop ended, leave the UI visible and on the final frame.
+            if (hidden) SetCountUpVisible(true);
             frame(1, 1);
-            FlashBackground.color = dim;
         }
 
         private IEnumerator FlawlessExplosionAnim()
