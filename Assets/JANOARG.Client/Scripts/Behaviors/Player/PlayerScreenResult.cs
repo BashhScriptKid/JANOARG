@@ -83,6 +83,39 @@ namespace JANOARG.Client.Behaviors.Player
         public AudioSource FanfareSource;
         public float       FanfareStart;
 
+        [Space, Header("All Flawless branch")]
+        [Tooltip("Alternate, stutter-gated fanfare for ALL FLAWLESS. Left empty, ALL FLAWLESS keeps the normal fanfare and animation.")]
+        public AudioClip FanfareFlawless;
+
+        [Tooltip("Clip time (s) of the drop in the flawless fanfare. Playback begins 4.5s before it, like the normal one.")]
+        public float FanfareFlawlessStart = 21.334f;
+
+        [Tooltip("Stutter gates as (close, open) offsets from the drop, in seconds. The count-up freezes inside each one.")]
+        public Vector2[] FlawlessGates =
+        {
+            new(-0.5507f, -0.4859f),
+            new(-0.3906f, -0.3208f),
+            new(-0.2240f, -0.1526f),
+        };
+
+        [Tooltip("Audio output latency (s). Raise it if the freeze lands before you hear the gap.")]
+        public float FlawlessSyncOffset;
+
+        [Tooltip("Flash dim alpha while a gate is closed.")]
+        [Range(0, 1)] public float FlawlessGateDim = .75f;
+
+        [Tooltip("Peak alpha of the white flash on the drop.")]
+        [Range(0, 1)] public float FlawlessFlashPeak = .85f;
+
+        [Tooltip("Size multiplier for the drop's explosion rings.")]
+        public float FlawlessExplosionScale = 1.6f;
+
+        [Tooltip("Optional. Played on the drop.")]
+        public ParticleSystem FlawlessBurst;
+
+        // Decided once in EndingAnim, read again by ResultAnim.
+        private bool _FlawlessBranch;
+
         [Space] public Image RetryBackground;
 
         public Image RetryFlash;
@@ -308,10 +341,13 @@ namespace JANOARG.Client.Behaviors.Player
 
         private IEnumerator EndingAnim()
         {
-            Fanfare.LoadAudioData();
             PlayerScreen.sMain.PlayerHUD.SetActive(false);
 
             PlayerScreen ps = PlayerScreen.sMain;
+
+            // Same condition as the ALL FLAWLESS banner below.
+            _FlawlessBranch = FanfareFlawless && ps.TotalCombo == ps.PerfectCount;
+            (_FlawlessBranch ? FanfareFlawless : Fanfare).LoadAudioData();
 
             if (ps.TotalCombo == ps.PerfectCount)
                 ResultText.text = "ALL FLAWLESS!!!";
@@ -421,13 +457,14 @@ namespace JANOARG.Client.Behaviors.Player
         {
             PlayerScreen.sMain.ResultExec = false;
             PlayerScreen.sMain.IsPlaying = false;
-            FanfareSource.clip = Fanfare;
+            FanfareSource.clip = _FlawlessBranch ? FanfareFlawless : Fanfare;
             FanfareSource.volume = 0;
+            float fanfareStart = _FlawlessBranch ? FanfareFlawlessStart : FanfareStart;
 
             while (!FanfareSource.isPlaying)
             {
                 FanfareSource.Play();
-                FanfareSource.time = FanfareStart - 4.5f;
+                FanfareSource.time = fanfareStart - 4.5f;
                 Debug.Log("Trying play");
 
                 yield return null;
@@ -503,8 +540,10 @@ namespace JANOARG.Client.Behaviors.Player
             var markIndex = 0;
             foreach (RectTransform mark in ScoreBarMarks) mark.gameObject.SetActive(false);
 
-            yield return Ease.Animate(
-                2.5f, x =>
+            // One frame of the score count-up. scoreProgress (0..1) is how much of the score is shown,
+            // so the normal and ALL FLAWLESS branches share everything else.
+            Action<float, float> countFrame =
+                (x, scoreProgress) =>
                 {
                     float ease1 = 1 -
                                   Mathf.Pow(1 - Ease.Get(Mathf.Clamp01(x * 1.5f), EaseFunction.Circle, EaseMode.Out), 2);
@@ -537,7 +576,7 @@ namespace JANOARG.Client.Behaviors.Player
                         new Vector3(1, .5f + .5f * ease1, 1);
 
                     float scoreLerp =
-                        score * Ease.Get(x, EaseFunction.Quintic, EaseMode.Out);
+                        score * scoreProgress;
 
                     ScoreText.text = Helper.PadScore(scoreLerp.ToString("#0"));
                     scoreLerp /= 1e6f;
@@ -593,11 +632,17 @@ namespace JANOARG.Client.Behaviors.Player
 
                     FanfareSource.volume =
                         (x * .4f + .6f) * Settings.BackgroundMusicVolume;
-                });
+                };
+
+            if (_FlawlessBranch)
+                yield return FlawlessCountUp(countFrame);
+            else
+                yield return Ease.Animate(
+                    2.5f, x => countFrame(x, Ease.Get(x, EaseFunction.Quintic, EaseMode.Out)));
 
             RankText.text = rank.Replace("+", "<size=70%><voffset=.5em>+");
             ScoreExplosionRings[2].rectTransform.position = ScoreRings[0].rectTransform.position;
-            StartCoroutine(RankExplosionAnim());
+            StartCoroutine(_FlawlessBranch ? FlawlessExplosionAnim() : RankExplosionAnim());
 
             SongInfoHolder.alpha = DetailsHolder.alpha = 0;
 
@@ -794,6 +839,107 @@ namespace JANOARG.Client.Behaviors.Player
 
                     FanfareSource.volume =
                         (x * .4f + .6f) * Settings.BackgroundMusicVolume;
+                });
+        }
+
+        // ---- ALL FLAWLESS branch -------------------------------------------------------------------------
+        // The flawless fanfare gates itself three times just before its drop. The count-up is driven by the
+        // audio clock instead of wall time, and freezes inside each gate, so the screen appears to lag in
+        // step with the music. It still lands on the full score exactly at the drop, then explodes.
+
+        /// <summary>Heard position of the fanfare relative to its drop, in seconds (negative before it).</summary>
+        private float FanfareRel()
+        {
+            double clipTime = (double)FanfareSource.timeSamples / FanfareSource.clip.frequency;
+            return (float)clipTime - FlawlessSyncOffset - FanfareFlawlessStart;
+        }
+
+        /// <summary>Seconds of count-up already swallowed by gates at <paramref name="rel" />.</summary>
+        private float GateFrozen(float rel)
+        {
+            float frozen = 0;
+            foreach (Vector2 g in FlawlessGates)
+                frozen += Mathf.Clamp(rel, g.x, g.y) - g.x;
+
+            return frozen;
+        }
+
+        private bool InGate(float rel)
+        {
+            foreach (Vector2 g in FlawlessGates)
+                if (rel >= g.x && rel < g.y)
+                    return true;
+
+            return false;
+        }
+
+        private IEnumerator FlawlessCountUp(Action<float, float> frame)
+        {
+            // Same length as the normal count-up, which also ends on the drop.
+            const float COUNT_LENGTH = 2.5f;
+
+            float swallowed = 0;
+            foreach (Vector2 g in FlawlessGates)
+                swallowed += g.y - g.x;
+
+            // Seconds of count-up that actually advance once the gates are taken out.
+            float live = COUNT_LENGTH - swallowed;
+
+            Color dim = new(0, 0, 0, .4f);
+            Color gated = new(0, 0, 0, FlawlessGateDim);
+            float waited = 0;
+
+            while (true)
+            {
+                float rel = FanfareRel();
+                waited += Time.unscaledDeltaTime;
+
+                // If the clock stops moving (source stopped, app paused), don't hang the result screen.
+                if (rel >= 0 || waited > COUNT_LENGTH + 1.5f) break;
+
+                float x = Mathf.Clamp01((rel + COUNT_LENGTH - GateFrozen(rel)) / live);
+
+                // Accelerating on purpose: the number is still climbing fast when the gates hit,
+                // so the freezes read as lag instead of as a finished count-up.
+                frame(x, Ease.Get(x, EaseFunction.Quadratic, EaseMode.In));
+                FlashBackground.color = InGate(rel) ? gated : dim;
+
+                yield return null;
+            }
+
+            frame(1, 1);
+            FlashBackground.color = dim;
+        }
+
+        private IEnumerator FlawlessExplosionAnim()
+        {
+            if (FlawlessBurst) FlawlessBurst.Play();
+
+            Color dim = new(0, 0, 0, .4f);
+            Color peak = new(1, 1, 1, FlawlessFlashPeak);
+            float k = FlawlessExplosionScale;
+
+            yield return Ease.Animate(
+                3f, x =>
+                {
+                    // White-out that settles back into the usual dim.
+                    float flash = 1 - Ease.Get(Mathf.Clamp01(x * 4), EaseFunction.Exponential, EaseMode.Out);
+                    FlashBackground.color = Color.Lerp(dim, peak, flash);
+
+                    float ease0 = Ease.Get(x, EaseFunction.Exponential, EaseMode.Out);
+                    float ease1 = Ease.Get(Mathf.Clamp01(x * 1.5f), EaseFunction.Exponential, EaseMode.Out);
+                    float ease2 = Ease.Get(Mathf.Clamp01(x * 1.2f - .2f), EaseFunction.Exponential, EaseMode.Out);
+
+                    ScoreExplosionRings[0].insideRadius = ease0;
+                    ScoreExplosionRings[0].rectTransform.sizeDelta = Vector2.one * ((700 * ease0 + 100) * k);
+
+                    ScoreExplosionRings[1].insideRadius = ease1;
+                    ScoreExplosionRings[1].rectTransform.sizeDelta = Vector2.one * ((1400 * ease1 + 100) * k);
+
+                    ScoreExplosionRings[2].insideRadius = ease2;
+                    ScoreExplosionRings[2].rectTransform.sizeDelta = Vector2.one * ((2400 * ease0 + 100) * k);
+
+                    FanfareSource.volume = (x * .4f + .6f) * Settings.BackgroundMusicVolume;
                 });
         }
 
