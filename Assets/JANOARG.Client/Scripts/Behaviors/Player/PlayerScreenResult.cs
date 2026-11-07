@@ -850,14 +850,27 @@ namespace JANOARG.Client.Behaviors.Player
             return (float)clipTime - FlawlessSyncOffset - FanfareFlawlessStart;
         }
 
+        private CanvasGroup _DetailsGroup;
+        private float       _DetailsAlpha = 1;
+
         /// <summary>Shows or hides everything the count-up animates (banner bar, score, breakdown, rings).</summary>
         private void SetCountUpVisible(bool visible)
         {
             ResultBackground.enabled = visible;
+
+            // Holds the score text, all three score rings and the score bar (with its marks).
             ScoreHolder.gameObject.SetActive(visible);
-            Details.gameObject.SetActive(visible);
+
             ScoreExplosionRings[0].enabled = visible;
             ScoreExplosionRings[1].enabled = visible;
+
+            // Details runs the pin animations on itself, so deactivating it would stop them mid-way and never
+            // resume them. It's hidden through alpha instead, and put back to whatever it was.
+            if (!_DetailsGroup && !Details.TryGetComponent(out _DetailsGroup))
+                _DetailsGroup = Details.gameObject.AddComponent<CanvasGroup>();
+
+            if (!visible) _DetailsAlpha = _DetailsGroup.alpha;
+            _DetailsGroup.alpha = visible ? _DetailsAlpha : 0;
         }
 
         // Accelerating on purpose: a lot of score is still left when the UI hides, so the catch-up is a jump.
